@@ -1,0 +1,26 @@
+#%RAML 1.0 DataType
+type: object
+properties:
+  data:
+    type: object
+    properties:
+      consents:
+        type: array
+        items:
+          type: object
+          properties:
+            id:
+              type: string
+              description: The unique Salesforce identifier for the consent record.
+            consentName:
+              type: string
+              description: The specific purpose or type of the consent.
+            status:
+              type: string
+              description: The privacy consent status of the record.
+            source:
+              type: string
+              description: The capture source of the consent.
+            type:
+              type: string
+              description: The contact point type for the consent.

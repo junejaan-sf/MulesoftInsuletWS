@@ -1,0 +1,31 @@
+{
+  "main": "sfl-test-consents-sys-api.raml",
+  "name": "SFL Test Consents System API",
+  "classifier": "raml",
+  "tags": [
+    "consents",
+    "sfl",
+    "system-api",
+    "salesforce"
+  ],
+  "descriptorVersion": "1.0.0",
+  "organizationId": "e0bc8c96-9dbd-48bc-915e-3e29577af6b3",
+  "apiVersion": "v1",
+  "originalFormatVersion": "1.0",
+  "dependencies": [
+    {
+      "groupId": "e0bc8c96-9dbd-48bc-915e-3e29577af6b3",
+      "assetId": "common-fragment-library",
+      "version": "1.0.16",
+      "packaging": "raml-fragment"
+    }
+  ],
+  "groupId": "e0bc8c96-9dbd-48bc-915e-3e29577af6b3",
+  "assetId": "sfl-test-consents-sys-api",
+  "version": "1.0.0",
+  "metadata": {
+    "projectId": "4a4b1430-8938-4252-a92e-78e8b5a5d66f",
+    "branchId": "master",
+    "commitId": "acddde28649c4962f27851c4435853461339b7cf"
+  }
+}

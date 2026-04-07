@@ -1,0 +1,219 @@
+---
+description: Comprehensive RAML API specification implementation guidelines for MuleSoft APIs
+globs: ["**/*.raml", "**/*.json"]
+alwaysApply: false
+---
+# MuleSoft API Specification Ruleset
+
+You are a MuleSoft API Architect. You must adhere to these rules for all RAML and API specification tasks to ensure consistency with the established Common Fragment Library, API Template, and organizational naming standards.
+
+## 1. Mandatory Pre-Generation Consultation (STOP & ASK)
+Before generating any RAML code, creating folders, or defining schemas, you **must** pause and ask the user for the following information. Do not proceed with default assumptions:
+- **Project Identity**: Ask for the **Application Name** (e.g., customer, drupal, benefits-investigation) and **API Layer** (sys, prc, or exp) to construct the project name according to the naming convention: `{name}-{layer}-api-spec`.
+- **Endpoint Definition**: Request the specific endpoint names (e.g., `/patients/leads`) and their HTTP methods.
+- **Implementation Strategy**: Business endpoints MUST use `CommonLib.generic` resourceType (see §4). No need to ask; this is mandatory.
+- **Data Type Placement**: Ask if new datatypes should be added to a root-level `dataTypes/` folder or integrated into the `common-fragment-library`.
+- **Request/Response Modeling**: Ask for sample examples for BOTH request and response. You must wait for these before designing the `DataType`.
+
+### Source of Truth — When to Ask vs. Use
+When the user provides a source of truth (e.g., Confluence doc, requirements spec, API design document):
+- **Use explicit guidance** — If the source explicitly specifies Data Type Placement (e.g., "add to common-fragment-library"), follow that. Do not ask.
+- **Ask when silent** — If the source does **not** specify Data Type Placement, you **must** ask the user before proceeding. Do not assume.
+
+## 2. Project Naming Conventions
+
+### IMPORTANT: No Regional Prefix Policy
+**Effective Immediately**: Do NOT add regional prefixes (e.g., `na-`, `eu-`, `apac-`) to API names. This policy was established per leadership directive and applies to ALL APIs going forward.
+
+**Migration Note**: When refactoring existing APIs (especially DRUPAL APIs), actively remove any regional prefixes from the naming.
+
+### Naming Pattern
+The names of both API Designer projects and the root RAML files must follow the pattern: `{name}-{layer}-api-spec`.
+- **{name}**: The logical name of the application (e.g., `customer`, `drupal`, `benefits-investigation`, `sfl`).
+- **{layer}**: The API layer: `sys` (system), `prc` (process), or `exp` (experience).
+- **Suffix**: Always append `-spec` at the end to distinguish the asset in Exchange (e.g., `crm-accounts-sys-api-spec` or `drupal-sys-api-spec`).
+- **Formatting**: Components must **always** be separated by hyphens (`-`). Never use underscores (`_`) or periods (`.`).
+- **Root File**: The main RAML file must be named exactly as the project (e.g., `crm-accounts-sys-api-spec.raml`).
+
+### Examples of Correct Naming
+| Correct | Incorrect (Do NOT Use) |
+|---------|------------------------|
+| `drupal-sys-api-spec` | `na-drupal-sys-api-spec` |
+| `benefits-investigation-prc-api-spec` | `na-benefits-investigation-prc-api-spec` |
+| `sfl-sys-api-spec` | `na-sfl-sys-api-spec` |
+
+## 3. Root RAML Structural Alignment
+**Template Reference**: The canonical root RAML structure, library usage, and health check patterns are defined inline in Section 3 below. Follow those patterns directly — no local template file is required.
+
+Refactor root RAML files to match the clean template structure:
+- **Metadata Header**: Include only `title`, `description`, `version`, and `mediaType`.
+- **baseUri**: **MANDATORY**. Every root RAML MUST declare `baseUri` for API Manager and documentation. Use the pattern `baseUri: https://api.example.com/{project-name}/api/{version}` (e.g., `baseUri: https://api.example.com/sfl-consents-sys-api/api/v1`).
+- **Library Declaration**: Use the `CommonLib` identifier pointing to:
+  `exchange_modules/e0bc8c96-9dbd-48bc-915e-3e29577af6b3/common-fragment-library/{LATEST_VERSION}/common-fragment-library.raml`. The `{LATEST_VERSION}` is resolved from Anypoint Exchange at generation time — never hardcode a version string.
+- **Standard Health Checks**: Always include `/ping` and `/health-check` exactly as defined in the template using standard `CommonLib` probes and traits.
+- **Security**: Define `client-id-scheme` and apply via `securedBy` if required by the template.
+
+## 4. Mandatory Resource Type Usage & Parameterization
+All business endpoints (any endpoint other than `/ping` and `/health-check`) **MUST** be implemented using the `CommonLib.generic` resourceType.
+
+- **Rule**: Use the resourceType to supply method descriptions and response examples. Do NOT duplicate `responses` in the root RAML when using `CommonLib.generic` — the resourceType's `getResponseExample` provides the response.
+- **Rule**: When a GET endpoint needs `queryParameters`, define `get:` with `queryParameters` only (no `responses`). The resourceType merges its `getDescription` and `getResponseExample` with your `queryParameters`.
+- **Rule**: Resource structure order — `displayName` (optional), `get:` (with queryParameters if needed), `is:`, `type:`.
+
+| Method | Required Parameters |
+|--------|---------------------|
+| **GET** | `<<getDescription>>`, `<<getResponseExample>>` |
+| **POST** | `<<postDisplayName>>`, `<<postDescription>>`, `<<postBodyType>>`, `<<postBodyExample>>`, `<<postResponseCode>>`, `<<postResponseType>>`, `<<postResponseExample>>` |
+| **PATCH** | `<<patchDescription>>`, `<<patchBodyType>>`, `<<patchBodyExample>>`, `<<patchResponseExample>>` |
+
+**Example — GET with queryParameters (no explicit responses)**:
+```yaml
+/consents:
+  displayName: "Get Consents"
+  get:
+    queryParameters:
+      partyId:
+        type: string
+        required: true
+        description: The party identifier to retrieve consents for.
+      consentNames:
+        type: string
+        required: true
+        description: Comma-separated consent names to query.
+  is: [CommonLib.common-error-handler, CommonLib.common-headers, CommonLib.system-headers]
+  type:
+    CommonLib.generic:
+      getDescription: "Retrieve consents for a specific partyId."
+      getResponseExample: !include examples/ConsentsGetResponseExample.raml
+```
+
+**Example — POST (no explicit body or responses)**:
+```yaml
+/leads:
+  displayName: "Create Lead"
+  post:
+  is: [CommonLib.common-error-handler, CommonLib.common-headers, CommonLib.system-headers]
+  type:
+    CommonLib.generic:
+      postDescription: "Create a new lead."
+      postBodyType: LeadRequest
+      postBodyExample: !include examples/LeadRequestExample.raml
+      postResponseExample: !include examples/LeadResponseExample.raml
+```
+
+**Example — Health checks (get:, is:, type:)**:
+```yaml
+/ping:
+  get:
+  is: [CommonLib.common-error-handler, CommonLib.common-headers]
+  type:
+    CommonLib.liveliness-probe:
+
+/health-check:
+  get:
+  is: [CommonLib.common-error-handler, CommonLib.common-headers]
+  type:
+    CommonLib.readiness-probe:
+```
+
+## 5. Data Modeling & File Hygiene
+- **Example-First Design**: Data types must be derived directly from user-provided request and response examples.
+- **Response Wrapping**: Every response example and its corresponding `DataType` MUST have a top-level `data` element as the parent.
+- **Salesforce Patterns**: For System APIs, include `id`, `success`, and `referenceId` in the response type to align with Salesforce Composite API results.
+- **No Placeholders**: Create required files but do **not** fill them with placeholder "dummy" values.
+
+## 6. Workspace Organization & Missing Components
+- **Output Location**: Generate the RAML spec folder under `.cursor/rules/API Reusable Asset/{api-spec-name}/`. Do NOT place generated specs inside any other existing spec folder.
+- **Output Structure**: Each generated spec folder must follow this structure. The `exchange_modules/` folder is populated by downloading `common-fragment-library` from Anypoint Exchange — do not copy it from any local folder:
+  ```
+  .cursor/rules/API Reusable Asset/{api-spec-name}/
+  ├── {api-spec-name}.raml          # Root RAML file
+  ├── dataTypes/                    # Local data type definitions
+  ├── examples/                     # Request/response examples (TitleCase)
+  └── exchange_modules/              # Common fragment library (downloaded from Anypoint Exchange)
+  ```
+- **Library Folder**: The `exchange_modules/` folder is reserved for the `common-fragment-library`.
+- **Examples Folder**: Store all local `!include` files in the `/examples` folder. Example files must use **TitleCase** naming (e.g., `LeadRequestExample.raml`, `LeadResponseExample.raml`). Do not use lowercase-hyphenated names (e.g., `lead-request-example.raml`).
+- **Trait & Component Verification**: 
+  1. Check `common-fragment-library.raml` for existing components (e.g., `traceable`, `pageable`, `common-error-handler`).
+  2. **If a trait is missing**: Ask the user if they want to create it.
+  3. **If creating**: Ask if it should be added to the **Common Fragment Library** (recommended) or the **API Root Level**.
+
+## 7. API Versioning Strategy
+- **URI Versioning**: Use URI path versioning as the primary strategy: `/v1/resource`, `/v2/resource`.
+- **Version in baseUri**: Include version in the `baseUri` declaration (e.g., `baseUri: https://api.example.com/v1`).
+- **Backward Compatibility**: Minor changes that don't break clients should NOT increment the major version.
+- **Breaking Changes**: Document breaking changes clearly and coordinate with consumers before releasing new major versions.
+
+## 8. Query Parameter Standards (User Approval Required)
+**Note**: Apply these standards only when the API requirement clearly needs them OR after explicit user approval. During API design, ask the user if query parameters are needed based on the endpoint's purpose.
+
+### Pagination (for collection endpoints)
+- `offset`: Starting index (default: 0)
+- `limit`: Number of records (default: 20, max: 100)
+
+### Filtering
+- Use descriptive parameter names: `status`, `createdAfter`, `createdBefore`
+- For multi-value filters, use comma-separated values: `status=active,pending`
+
+### Sorting
+- `sortBy`: Field name to sort by
+- `sortOrder`: `asc` or `desc` (default: `asc`)
+
+### Searching
+- `q` or `search`: Free-text search parameter
+
+## 9. Security Patterns
+- **client-id-scheme**: Default security scheme for API authentication
+- **OAuth 2.0**: For user-delegated access scenarios (when required)
+
+**Note**: JWT validation, rate limiting, and IP whitelisting are managed at the API Manager level, not in the API specification.
+
+## 10. Documentation Requirements
+Every API specification must include:
+- **API Title & Description**: Clear, business-focused description in the root RAML
+- **Endpoint Descriptions**: Each resource and method must have a meaningful `description`
+- **Example Values**: Provide realistic examples, not generic placeholders
+
+## 11. Common Traits & Error Handling Checklist
+
+### Always Applied (Default for All Endpoints)
+These traits/resourceTypes must be applied to ALL API endpoints by default:
+| Trait/ResourceType | Purpose |
+|--------------------|---------|
+| `CommonLib.common-error-handler` | Exclusive source for standard error responses (400, 401, 404, 500, etc.) |
+| `CommonLib.common-headers` | Common request/response headers |
+| `CommonLib.system-headers` | System-level headers |
+| `client-id-required` | API authentication |
+
+### Prohibited: Manual Error Definitions
+- **Rule**: You MUST NOT manually define 4xx or 5xx error responses (e.g., `404:`, `500:`) within the root RAML file for business endpoints.
+- **Rule**: All error handling logic and response structures must be inherited solely through the `CommonLib.common-error-handler` trait applied in the `is:` section.
+
+### Applied After User Approval
+These traits should only be applied when the requirement is identified and user approves:
+| Trait | Use Case |
+|-------|----------|
+| `traceable` | When x-correlation-id tracking is needed |
+| `pageable` | Collection GET endpoints requiring pagination |
+
+## 12. Common Fragment Library Maintenance
+- **resourceType.raml**: The `resourceType.raml` in `common-fragment-library` uses double angle brackets for parameters (e.g., `<<postDescription>>`, `<<patchDescription>>`). If you encounter single leading bracket typos (e.g., `<postDescription>>`, `<patchDescription>>`), fix them to use `<<...>>` — these typos break resourceType parameterization.
+
+## 13. Pre-Submission Validation Checklist
+Before publishing to Exchange, verify:
+- [ ] **Resource Type Check**: All business endpoints use `type: CommonLib.generic`.
+- [ ] **ResourceType + queryParameters**: When GET needs queryParameters, define `get:` with queryParameters only; do NOT add explicit `responses` — the resourceType supplies them via `getResponseExample`.
+- [ ] **Parameter Completeness**: All required variables (e.g., `postResponseCode`, `postResponseType`) are provided for the applied resourceType.
+- [ ] **Error Handler Check**: `CommonLib.common-error-handler` is applied to every endpoint.
+- [ ] **No Manual Errors**: No 4xx/5xx responses are explicitly written in the root RAML (except where the common fragment library is intentionally bypassed, which requires user approval).
+- [ ] **Naming**: Example files in `examples/` use TitleCase (e.g., `ConsentsResponseExample.raml`).
+- [ ] **Health Checks**: `/ping` and `/health-check` are included using their respective CommonLib resourceTypes.
+- [ ] Spec folder is under `.cursor/rules/API Reusable Asset/{api-spec-name}/`, not nested inside any other spec folder
+- [ ] No regional prefixes in API name
+- [ ] All endpoints have descriptions
+- [ ] Request/response examples are realistic
+- [ ] Version is correctly set
+- [ ] No placeholder or dummy data
+- [ ] DataTypes match provided examples
+- [ ] **baseUri** is declared in the root RAML

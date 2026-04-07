@@ -1,0 +1,124 @@
+---
+description: >-
+  Generates or updates a RAML API spec by fetching a JIRA story and its
+  linked Confluence design page. Triggers when the user says "raml <JIRA-ID>",
+  "generate RAML from story <JIRA-ID>", or provides one or more story IDs
+  alongside a RAML generation request.
+globs:
+alwaysApply: false
+---
+
+# JIRA-to-RAML Generation Workflow
+
+When the user provides one or more JIRA story IDs (e.g., `raml NGCRMI-1875` or `raml NGCRMI-1875 NGCRMI-1886`), execute this full workflow automatically without asking for extra input unless a value is genuinely ambiguous after reading both sources.
+
+---
+
+## Step 1 — Read Standards First (parallel)
+
+Before touching any RAML files, read these two rules simultaneously:
+- `gen-raml-implementation.mdc` — RAML structure, naming conventions, CommonLib usage, mandatory patterns
+- `review-api-design-standards.mdc` — validation checklist to apply before finishing
+
+---
+
+## Step 2 — Fetch Each JIRA Story
+
+For each story ID, call the JIRA REST API:
+
+```
+GET https://insulet.atlassian.net/rest/api/3/issue/{STORY-ID}
+Authorization: Basic base64(email:token)
+Accept: application/json
+```
+
+Credentials are in `/Users/ankush.juneja/Downloads/insulet-atlassian-mcp-guardrails-main/.env`:
+- `JIRA_EMAIL` — the account email
+- `JIRA_TOKEN` — the API token
+
+Fields to extract from the response:
+| Field | JSON key |
+|---|---|
+| Summary | `fields.summary` |
+| User story | `fields.description` |
+| Acceptance Criteria | `fields.customfield_10308` |
+| Technical Notes (has Confluence URL) | `fields.customfield_10364` |
+
+Parse the Atlassian Document Format (ADF) nodes to plain text. Confluence URLs appear as `inlineCard` nodes or plain `text` nodes inside `customfield_10364`.
+
+---
+
+## Step 3 — Fetch the Confluence Design Page
+
+Extract the Confluence page URL from the Technical Notes. The URL format is:
+```
+https://insulet.atlassian.net/wiki/spaces/{SPACE}/pages/{PAGE-ID}/{SLUG}
+```
+
+Call the Confluence REST API using the same credentials:
+```
+GET https://insulet.atlassian.net/wiki/rest/api/content/{PAGE-ID}?expand=body.storage
+Authorization: Basic base64(email:token)
+Accept: application/json
+```
+
+Strip HTML from `body.storage.value` and parse for:
+- Endpoint paths (e.g., `GET /consents`, `PUT /consents/{id}`)
+- Input fields — query parameters, URI parameters, request body fields (name, type, mandatory flag)
+- Output field mappings — API field name, data type, Salesforce source field, description
+- HTTP status codes and their trigger conditions
+- Salesforce object name (e.g., `ContactPointTypeConsent`)
+
+If multiple JIRA stories reference the same Confluence page, fetch it only once.
+
+---
+
+## Step 4 — Resolve Design Decisions (automatic, no user prompt needed)
+
+Apply these precedence rules in order:
+
+| Decision | Rule |
+|---|---|
+| Field naming conflict between JIRA TC Guide and Confluence column header | **JIRA TC Guide wins** — e.g., if TC Guide says "Map Name to `consentName`", use `consentName` even if the Confluence table header says `name` |
+| Response envelope | **Always `data`** as the top-level wrapper per `gen-raml-implementation.mdc` §5, regardless of what Confluence shows |
+| HTTP verb | **Follow Confluence/JIRA stories exactly** — do not silently change PUT to PATCH or vice versa |
+| PUT endpoints | **Inline body/responses** — `CommonLib.generic` only defines `get?`, `post?`, `patch?`; for PUT use explicit block with `is: [CommonLib.common-error-handler, CommonLib.common-headers, CommonLib.system-headers]` |
+| Fields with no Salesforce mapping | **Remove them** — do not include fields that cannot be mapped to a Salesforce source field in the Confluence table |
+| `referenceId` or other extra fields not in Confluence output | **Remove them** |
+| `data` wrapper for Salesforce update responses | Apply `data` object wrapper with `id` and `success` per §5 |
+
+---
+
+## Step 5 — Generate or Update RAML
+
+**Output location:** `.cursor/rules/API Reusable Asset/{api-spec-name}/`
+
+The `api-spec-name` is derived from the Confluence/JIRA application name following the `{name}-{layer}-api-spec` pattern (no regional prefix).
+
+If the spec folder **already exists**, update existing files in place and delete any stale fields or DataTypes not supported by the current Confluence design.
+
+If it **does not exist**, scaffold an empty `exchange_modules/` directory and download the latest `common-fragment-library` from Anypoint Exchange to populate it (same download flow as Phase 7 of the full publish workflow).
+
+### Required output files
+
+```
+{api-spec-name}/
+├── {api-spec-name}.raml              ← root RAML (title, baseUri, types, resources)
+├── dataTypes/
+│   └── {DataTypeName}.raml           ← one file per DataType (TitleCase)
+├── examples/
+│   └── {ExampleName}Example.raml     ← one file per example (TitleCase)
+└── exchange_modules/                 ← downloaded from Anypoint Exchange when scaffolding new spec
+```
+
+### Checklist before finishing
+
+- [ ] All business endpoints use `CommonLib.generic` resourceType (except PUT — use inline)
+- [ ] `CommonLib.common-error-handler` applied to every endpoint via `is:`
+- [ ] No manually defined 4xx/5xx responses in root RAML
+- [ ] Every response DataType and example has a top-level `data` wrapper
+- [ ] Example files are TitleCase (e.g., `ConsentsGetResponseExample.raml`)
+- [ ] No regional prefix in spec name
+- [ ] `baseUri` declared
+- [ ] `/ping` and `/health-check` included using `CommonLib.liveliness-probe` / `CommonLib.readiness-probe`
+- [ ] `client-id-scheme` declared and applied via `securedBy`
