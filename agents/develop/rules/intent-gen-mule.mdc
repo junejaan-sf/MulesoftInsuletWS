@@ -1,0 +1,38 @@
+---
+description: Triggers Mule flow and logic generation when the user asks to generate, create, scaffold, build, or implement Mule flows, sub-flows, or DataWeave scripts
+globs: 
+alwaysApply: false
+---
+
+# Mule Flow & Logic Generation Intent
+
+When the user's request is about **generating**, **creating**, **scaffolding**, **building**, or **implementing** Mule flows, sub-flows, DataWeave transformations, or integration logic, use this intent to guide the process.
+
+## Procedure
+
+1. **Read `implementation-ruleset_v4.mdc`** from `agents/develop/rules/` — primary ruleset for scaffolding, user decisions, project structure, POM, config, InitialVars, error handling, and common-connectivity patterns
+2. **Read all `gen-mule-*.mdc` files** from the `agents/develop/rules/` directory for Mule generation standards
+3. **Also read applicable `review-*.mdc` files** from `agents/review/rules/` to ensure generated code meets review standards:
+   - `review-mule-flow-naming.mdc` — naming conventions
+   - `review-logging-standards.mdc` — logger setup
+   - `review-error-handling.mdc` — error handler patterns
+   - `review-mule-global-config.mdc` — global config structure
+   - `review-dataweave-standards.mdc` — DWL externalization
+   - `review-properties-config.mdc` — property file structure
+   - `review-security-standards.mdc` — secret management
+3b. **Check `project/input_develop/` for pre-fetched JIRA and Confluence context files:**
+   - **If `jira-*.md` and `confluence-design-*.md` are both present:** Read them immediately to understand the full business requirements, acceptance criteria, downstream systems, and Confluence design decisions. Do NOT re-fetch from JIRA or Confluence.
+   - **If either or both files are missing:** Inform the user which file(s) are absent and ask: *"No pre-fetched JIRA/Confluence context was found in `project/input_develop/`. Would you like me to fetch it now? If yes, please provide the JIRA story ID."*
+   - **If the user provides a JIRA story ID:** Fetch the JIRA story and its linked Confluence page using the same credential lookup as `intent-gen-raml-from-jira.mdc` (Steps 2–3), then save `jira-{STORY-ID}.md` and `confluence-design-{STORY-ID}.md` to `project/input_develop/` before proceeding.
+   - **If the user says to proceed without:** Continue using only the RAML spec and any other files present in `project/input_develop/`.
+4. **Understand the integration requirements** from the pre-fetched context files, RAML spec, or user's description
+5. **Generate Mule artifacts** following the standards
+
+## Generation Scope
+- Mule XML flow files under `src/main/mule/`
+- Global configuration in `src/main/mule/common/global-config.xml`
+- Error handler in `src/main/mule/common/global-error-handler.xml`
+- DataWeave scripts under `src/main/resources/dwls/`
+- Error mappings under `src/main/resources/errors/`
+- Property files under `src/main/resources/properties/`
+- `log4j2.xml` configuration

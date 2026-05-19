@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!-- =========================================================
+	     MAIN FLOW
+	     Entry point for all REST requests. Sets requestContext,
+	     routes via APIKit, applies global error handler.
+	     ========================================================= -->
+	<flow name="http-proc-api-template-main" doc:id="a1b2c3d4-e5f6-7890-abcd-ef1234567891">
+		<http:listener config-ref="global-http-listener_config" path="${http.basePath}" doc:name="HTTP Listener">
+			<http:response statusCode="#[vars.httpStatus default 200]">
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:response>
+			<http:error-response statusCode="#[vars.httpStatus default 500]">
+				<http:body><![CDATA[#[payload]]]></http:body>
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:error-response>
+		</http:listener>
+		<ee:transform doc:name="Set Request Context" doc:id="b2c3d4e5-f6a7-8901-bcde-f12345678902">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+			</ee:variables>
+		</ee:transform>
+		<apikit:router config-ref="http-proc-api-template-spec-config" doc:name="APIKit Router" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+	<!-- =========================================================
+	     MAIN OPERATION — PUT /providers/records/{id}
+	     Demonstrates the proc-API orchestration pattern.
+
+	     When scaffolding a real proc API, rename this flow to match
+	     the actual HTTP method and resource path from the RAML spec,
+	     following the APIKit naming convention:
+	       {method}:\{path-segments}\({path-param}):application\json:{api-spec}-config
+
+	     Examples:
+	       post:\patients\leads:application\json:{api-spec}-config
+	       put:\providers\accounts\(id):application\json:{api-spec}-config
+	     ========================================================= -->
+	<flow name="put:\providers\records\(id):application\json:http-proc-api-template-spec-config" doc:id="c3d4e5f6-a7b8-9012-cdef-123456789013">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="put:\providers\records\(id)"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails="#[attributes.uriParams default &quot;&quot;]" />
+		<flow-ref name="update-record-sub-flow" doc:name="update-record-sub-flow" doc:id="d4e5f6a7-b8c9-0123-defa-234567890124" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="put:\providers\records\(id)"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     LIVENESS — GET /ping
+	     Returns a lightweight alive response; no downstream calls.
+	     ========================================================= -->
+	<flow name="get:\ping:http-proc-api-template-spec-config" doc:id="e5f6a7b8-c9d0-1234-efab-345678901235">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="get:\ping"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<ee:transform doc:name="DW Set Aliveness Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-liveness-response.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="get:\ping"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     READINESS — GET /health-check
+	     Pings all downstream SAPIs in parallel via scatter-gather.
+	     ========================================================= -->
+	<flow name="get:\health-check:http-proc-api-template-spec-config" doc:id="f6a7b8c9-d0e1-2345-fabc-456789012346">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="get:\health-check"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref name="healthcheck-ready-sub-flow" doc:name="healthcheck-ready-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="get:\health-check"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+</mule>

@@ -1,0 +1,13 @@
+{
+  "main": "common-fragment-library.raml",
+  "name": "common-fragment-library",
+  "groupId": "e0bc8c96-9dbd-48bc-915e-3e29577af6b3",
+  "assetId": "common-fragment-library",
+  "version": "1.0.29",
+  "classifier": "raml-fragment",
+  "tags": [],
+  "descriptorVersion": "1.0.0",
+  "organizationId": "e0bc8c96-9dbd-48bc-915e-3e29577af6b3",
+  "apiVersion": "v1",
+  "originalFormatVersion": "1.0"
+}

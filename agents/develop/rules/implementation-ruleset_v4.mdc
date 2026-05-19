@@ -1,0 +1,2016 @@
+---
+description: Implementation ruleset v4 — standalone, self-contained ruleset for Mule 4 API projects. Defines all implementation standards, canonical XML/DWL snippets, and integration pattern catalog. No dependency on earlier ruleset versions.
+globs: ["**/src/main/mule/**/*.xml", "**/pom.xml", "**/*-api-spec/**/*.raml", "**/src/main/resources/log4j2.xml", "**/src/main/resources/**/*.dwl", "**/src/main/resources/properties/*.properties", "**/src/test/munit/**/*.xml"]
+alwaysApply: false
+---
+
+# Mule API Implementation Ruleset v4
+
+**Purpose:** Central, self-contained ruleset for Mule 4 API implementation standards and code generation. Add or update rules as project requirements evolve. **Reference:** `agents/develop/examples/` for API-specific specs and templates (e.g., `{api-name}.md`).
+
+## Overrides
+
+- This ruleset (`implementation-ruleset_v4.mdc`) is the primary authority for Mule 4 development standards.
+- For global-config naming, this ruleset supersedes the older `{description}_{type}` camelCase format from `review-mule-global-config.mdc` (e.g., `customer-sapi_httpListenerConfig`). The canonical form is `{description}_config` with hyphens (e.g., `api-listener_config`).
+- Sibling `review-*.mdc` rules remain authoritative for their respective domains (logging, error handling, security, MUnit, POM, RAML, Maven settings, API design).
+
+---
+
+## 1. Bootstrap (do this first, every project)
+
+**Apply this before any other logging or flow changes.**
+
+### POM dependency
+
+```xml
+<dependency>
+    <groupId>${project.parent.groupId}</groupId>
+    <artifactId>log4j-datadog-appender</artifactId>
+    <version>1.0.1</version>
+</dependency>
+```
+
+### Configuration packages
+
+- **packages:** `com.insulet.datadog,org.apache.logging.log4j` (required for DataDogLog4jAppender)
+
+### DataDogLog4jAppender
+
+- **name:** `DATADOG`
+- **endpoint:** `${sys:DATADOG_HOST}` (set as a system property at CloudHub deploy time — do NOT hardcode a URL)
+- **apiKey:** `${sys:DATADOG_API_KEY}` (set via environment or deployment properties)
+- **source:** `MuleSoft`
+- **host:** `${hostName}`
+- **service:** `${project.artifactId}`
+- **apiLayer:** `${sys:anypoint.platform.visualizer.layer}`
+- **environment:** `${sys:mule.env}`
+- **ddTags:** `integration:MuleSoft-To-DataDog`
+- **batchSize:** `500`, **maxBytesPerBatch:** `5242880`, **flushIntervalMs:** `5000`
+- **connectTimeoutMs:** `2000`, **readTimeoutMs:** `10000`
+- **retryEnabled:** `true`, **retryCount:** `3`
+- **enableCircuitBreaker:** `true`, **circuitBreakerFailures:** `5`, **circuitBreakerOpenMs:** `30000`
+- **compressPayloads:** `true`
+- **PatternLayout:** `%-5p %d [%t] [processor: %X{processorPath}; event: %X{correlationId}] %c: %m%n`
+
+### AsyncLogger categories (Insulet Custom Logger Connector)
+
+- `com.insulet.general` — level INFO (without-payload logs)
+- `com.insulet.maskedpayload` — level INFO (masked payload logs)
+- `com.insulet.encryptedpayload` — level **DEBUG** (encrypted payload logs)
+
+### AsyncRoot
+
+- Include both appenders: `<AppenderRef ref="file"/>` and `<AppenderRef ref="DATADOG"/>`
+- **PROD:** Set all three AsyncLogger categories to WARN (no leftover DEBUG)
+
+### Canonical `log4j2.xml` skeleton (embedded — no external reference required)
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration status="INFO" name="cloudhub"
+    packages="com.insulet.datadog,org.apache.logging.log4j">
+    <Appenders>
+        <RollingFile name="file" fileName="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}${project.artifactId}.log"
+                     filePattern="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}${project.artifactId}-%i.log">
+            <PatternLayout pattern="%-5p %d [%t] [processor: %X{processorPath}; event: %X{correlationId}] %c: %m%n"/>
+            <SizeBasedTriggeringPolicy size="10 MB"/>
+            <DefaultRolloverStrategy max="10"/>
+        </RollingFile>
+        <DataDogLog4jAppender name="DATADOG"
+              endpoint="${sys:DATADOG_HOST}"
+              apiKey="${sys:DATADOG_API_KEY}"
+              source="MuleSoft"
+              host="${hostName}"
+              service="${project.artifactId}"
+              apiLayer="${sys:anypoint.platform.visualizer.layer}"
+              environment="${sys:mule.env}"
+              ddTags="integration:MuleSoft-To-DataDog"
+              batchSize="500"
+              maxBytesPerBatch="5242880"
+              flushIntervalMs="5000"
+              connectTimeoutMs="2000"
+              readTimeoutMs="10000"
+              retryEnabled="true"
+              retryCount="3"
+              enableCircuitBreaker="true"
+              circuitBreakerFailures="5"
+              circuitBreakerOpenMs="30000"
+              compressPayloads="true">
+            <PatternLayout pattern="%-5p %d [%t] [processor: %X{processorPath}; event: %X{correlationId}] %c: %m%n" />
+        </DataDogLog4jAppender>
+    </Appenders>
+    <Loggers>
+        <AsyncLogger name="org.mule.service.http" level="WARN"/>
+        <AsyncLogger name="org.mule.extension.http" level="WARN"/>
+        <AsyncLogger name="org.mule.runtime.core.internal.processor.LoggerMessageProcessor" level="INFO"/>
+        <AsyncLogger name="com.insulet.general" level="INFO" />
+        <AsyncLogger name="com.insulet.maskedpayload" level="INFO" />
+        <AsyncLogger name="com.insulet.encryptedpayload" level="DEBUG" />
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="file"/>
+            <AppenderRef ref="DATADOG"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>
+```
+
+> **PROD override:** Set all three `com.insulet.*` AsyncLogger categories to `level="WARN"` in the PROD `log4j2.xml`. Do not leave any at INFO or DEBUG in production.
+
+---
+
+## 2. User Decisions — Ask First
+
+Before generating or scaffolding any code, **ask the user** for:
+
+- **Integration Pattern (NEW — ask first):** Which of the three patterns in Section 3 applies?
+  - 3.1 HTTP Listener API (sys / proc / exp)
+  - 3.2 Anypoint MQ Consumer (event-driven proc API)
+  - 3.3 Salesforce Pub/Sub Event App (exp API)
+
+  This single answer drives context variable, error style, retry/idempotency, MUnit mock surface, required env-property keys, and health-check expectations.
+
+- **RAML Spec:** Add RAML dependency to `pom.xml` OR provide Exchange details (groupId, artifactId, version) OR path to local RAML file. Root XML file must be named `{api-spec-name}.xml`.
+- **Logging placement:** Where to use encrypted vs masked payload? Default: error handlers + common-connectivity = encrypted; business flows = masked for DEBUG.
+- **Azure Key Vault keys:** Secret names for `config-{env}.properties`. All credentials via `${azure-key-vault-properties-provider::secret::<key-name>}`. No `secureProperties` in `mule-artifact.json`; no `config-secure-{env}.properties`.
+- **Notification connector:** Yes or No. If Yes: add notification config, `send-notification-sub-flow` in global error handler, `v-notification-input-body.dwl`, env-specific `notification.api.*` properties. **Use `module-notification:call-notification-api`** (not `module-notification:send`).
+- **Flow/sequence/arch diagram:** Provide as Mermaid code (preferred) or as an image (PNG, JPG, SVG). If an image is provided, the AI will convert it to Mermaid for interpretation; you may review and edit the generated Mermaid before code generation. If not provided, scaffold structure only — do not assume business logic.
+
+---
+
+## 3. Integration Pattern Catalog
+
+This section categorizes all in-scope work into three patterns. The pattern selected in Section 2 mechanically determines several downstream decisions.
+
+### Pattern Decision Matrix
+
+| Trigger element | Sync / Async | Layer(s) | Pattern |
+|---|---|---|---|
+| `http:listener` | Synchronous request/response | sys / proc / exp | **3.1 HTTP Listener API** |
+| `anypoint-mq:subscriber` | Async (consumer) | proc | **3.2 Anypoint MQ Consumer** |
+| `salesforce-pub-sub:subscribe-channel-listener` | Async (event-driven) | exp API | **3.3 Salesforce Pub/Sub Event App** |
+
+Each pattern is described with the same template (Trigger / Main Flow / Context Variable / Required Global Configs / Outbound Calls / Error Handling / Retry & Idempotency / Health Check / MUnit Mock Surface / Required Env-Property Keys / When to Choose). All snippets are embedded — no external reference projects required.
+
+---
+
+### 3.1 HTTP Listener API (sys / proc / exp)
+
+**Trigger:**
+
+```xml
+<http:listener path="${http.basePath}" config-ref="api-listener_config">
+    <http:response statusCode="#[vars.httpStatus default 200]">
+        <http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+    </http:response>
+    <http:error-response statusCode="#[vars.httpStatus default 500]">
+        <http:body><![CDATA[#[payload]]]></http:body>
+        <http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+    </http:error-response>
+</http:listener>
+```
+
+**Main flow shape — `{api-spec}-main`:**
+
+```xml
+<flow name="{api-spec}-main">
+    <http:listener path="${http.basePath}" config-ref="api-listener_config">
+        <http:response statusCode="#[vars.httpStatus default 200]">
+            <http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+        </http:response>
+        <http:error-response statusCode="#[vars.httpStatus default 500]">
+            <http:body><![CDATA[#[payload]]]></http:body>
+        </http:error-response>
+    </http:listener>
+    <ee:transform doc:name="Set Request Context">
+        <ee:message />
+        <ee:variables>
+            <ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+        </ee:variables>
+    </ee:transform>
+    <apikit:router config-ref="{api-spec}_config" />
+    <error-handler ref="global-error-handler" />
+</flow>
+```
+
+**Context variable:** `vars.requestContext` — set in the main flow before APIKit router via `dwls/v-request-context.dwl` (see Section 15 for the canonical DWL content).
+
+**Required global configs in `global-config.xml`:**
+
+- `api-listener_config` — `http:listener-config`
+- `{api-spec}_config` — `apikit:config`
+- `custom-logger-connector_config` — `module-logger:config`
+- `azure-key-vault-properties-provider_config` — Azure Key Vault properties provider
+- One or more `http-{target}-server_http-request_config` — `http:request-config` per downstream system (only when calling downstream)
+- `api-autodiscovery_config` — `api-gateway:autodiscovery`
+
+**Outbound calls:** Set `vars.targetApiParams` via DWL, then `flow-ref` to `{downstream-sys-api}-request-flow` (per-system named flow with static `config-ref`). See Section 9.
+
+**Error handling:** Global error handler defined in `global-error-handler.xml` returns a structured error response (`correlationId`, `status`, `code`, `message`) via `on-error-continue`. HTTP status from `errors/customErrors.dwl`. See Section 12.
+
+**Retry / idempotency:** `until-successful` for transient HTTP errors inside each `{downstream-sys-api}-request-flow` (Section 9). Idempotency at the listener is the caller's responsibility unless an `Idempotency-Key` header is contractually defined.
+
+**Health check expectation:** Both `GET /ping` (liveness — no dependency check) and `GET /health-check` (readiness — calls each downstream `/health-check`) are required for HTTP APIs. See Section 10.
+
+**MUnit mock surface:** Mock every `http:request` to downstream systems per endpoint. Set `vars.requestContext` via `munit:variable` when flow-ref'ing directly to API flows (bypassing the main flow).
+
+**Required env-property keys (subset of Section 7):**
+
+- `api.id`, `http.host`, `http.port`, `http.basePath`, `http.timeout`, `http.idleTimeout`
+- `request.timeout`, `request.idleTimeout`, `retry.attempts`, `retry.interval`
+- `httpErrors`, `timezone`, `sourceSystem`, `targetSystem`
+- For each downstream `{system}`: `{system}.host`, `{system}.basePath`, `{system}.client_id`, `{system}.client_secret`; if health-check is exposed, `{system}.healthCheck.method`, `{system}.healthCheck.path`
+- `logger.category`, `logger.sensitiveKeyParts`, `logger.safeKeys`, `logger.encryptionKey`
+
+**When to choose:** Synchronous request/response APIs at any layer (sys = direct backend wrapper; proc = orchestration; exp = client-shaped).
+
+**Reference Templates (available in this workspace):**
+
+- **Sys / Exp API (Salesforce CRUD):** `agents/develop/templates/sf-http-sys-api-template/`
+  Scaffold keys: `create-record-sub-flow`, `get-records-sub-flow`, `update-record-sub-flow`, `sf-composite-request-sub-flow`; DWLs in `dwls/`; 3 MUnit suites in `src/test/munit/`.
+  Use when the Jira story involves Salesforce CRUD via an HTTP-synchronous sys-API or exp-API.
+
+- **Proc API (HTTP orchestration):** `agents/develop/templates/http-proc-api-template/`
+  Scaffold keys: `{operation}-sub-flow` with scatter-gather + conditional routes; single dynamic `outbound-sapi-http-request_config`; `async-error-flow-sub-flow`; `post-transactions-errors-sub-flow`; `errors/errorCatalog.dwl`.
+  Key differences from sys-API template: single dynamic outbound config (not per-SF-object static configs), async error logging to `sfl-crm-persona-sys-api /transactions-errors`, `errors/errorCatalog.dwl` for per-SAPI transaction IDs, `src/main/resources/application-types.xml`.
+  Use when the Jira story is a synchronous HTTP proc API orchestrating multiple downstream SAPIs with optional parallel operations.
+
+---
+
+### 3.2 Anypoint MQ Consumer (event-driven proc API)
+
+**Trigger:**
+
+```xml
+<anypoint-mq:subscriber doc:name="MQ Subscriber"
+    config-ref="anypoint-mq_config"
+    destination="${mq.queueName}"
+    acknowledgementMode="AUTO">
+    <reconnect frequency="${mq.reconnection.frequency}" count="${mq.reconnection.attempts}"/>
+    <anypoint-mq:subscriber-type>
+        <anypoint-mq:prefetch maxLocalMessages="${mq.maxLocalMessages}" />
+    </anypoint-mq:subscriber-type>
+    <anypoint-mq:circuit-breaker
+        tripTimeout="${mq.subscriber.circuitBreaker.tripTimeout}"
+        errorsThreshold="${mq.subscriber.circuitBreaker.errorsThreshold}"/>
+</anypoint-mq:subscriber>
+```
+
+**Main flow shape — `{queue-name}-mq-consumer`:**
+
+```xml
+<flow name="{queue-name}-mq-consumer">
+    <anypoint-mq:subscriber doc:name="MQ Subscriber"
+        config-ref="anypoint-mq_config"
+        destination="${mq.queueName}"
+        acknowledgementMode="AUTO">
+        <reconnect frequency="${mq.reconnection.frequency}" count="${mq.reconnection.attempts}"/>
+        <anypoint-mq:subscriber-type>
+            <anypoint-mq:prefetch maxLocalMessages="${mq.maxLocalMessages}" />
+        </anypoint-mq:subscriber-type>
+        <anypoint-mq:circuit-breaker
+            tripTimeout="${mq.subscriber.circuitBreaker.tripTimeout}"
+            errorsThreshold="${mq.subscriber.circuitBreaker.errorsThreshold}"/>
+    </anypoint-mq:subscriber>
+    <tracing:with-correlation-id correlationId="#[attributes.properties.correlationId default correlationId]">
+        <module-logger:build-log-with-encrypted-payload doc:name="Received MQ message"
+            config-ref="custom-logger-connector_config"
+            message="Received message from the MQ"
+            sourceSystem="#[attributes.properties.SourceSystem]"
+            targetSystem="#[p('targetSystem')]"
+            tracepoint="BEFORE_HTTP_REQUEST">
+            <module-logger:body><![CDATA[#[output application/json ---
+{
+    "Payload received": payload,
+    "Properties received": attributes.properties
+}]]]></module-logger:body>
+        </module-logger:build-log-with-encrypted-payload>
+        <try>
+            <ee:transform doc:name="Request to Downstream">
+                <ee:message />
+                <ee:variables>
+                    <ee:set-variable resource="dwls/v-targetApiParams-{system}.dwl" variableName="targetApiParams" />
+                    <ee:set-variable resource="dwls/p-initial-vars.dwl" variableName="initialVar" />
+                </ee:variables>
+            </ee:transform>
+            <flow-ref name="{downstream-sys-api}-request-flow"/>
+            <error-handler>
+                <on-error-continue doc:name="On Error Continue">
+                    <module-logger:build-error-log-with-encrypted-payload
+                        config-ref="custom-logger-connector_config"
+                        message="Downstream call failed"
+                        logLevel="ERROR" tracepoint="EXCEPTION"
+                        sourceSystem="#[vars.initialVar.sourceSystem]"
+                        targetSystem="#[vars.initialVar.targetSystem]"
+                        entityDetails="#[vars.initialVar.entityDetails default null]"
+                        cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+                        errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+                        errorDescription='#[vars.errorDetails.detailedDescription default error.description default ""]'
+                        errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]">
+                        <module-logger:body><![CDATA[#[output application/json ---
+{
+    "Payload received": vars.initialVar.originalPayload,
+    "Properties received": attributes.properties
+}]]]></module-logger:body>
+                    </module-logger:build-error-log-with-encrypted-payload>
+                </on-error-continue>
+            </error-handler>
+        </try>
+        <flow-ref name="success-response-sub-flow"/>
+    </tracing:with-correlation-id>
+</flow>
+```
+
+**Context variable:** `vars.initialVar` — set via `dwls/p-initial-vars.dwl` (see Section 15 for the canonical DWL content).
+
+**Required global configs in `global-config.xml`:**
+
+- `anypoint-mq_config` — Anypoint MQ connector with reconnection
+- `custom-logger-connector_config`
+- `azure-key-vault-properties-provider_config`
+- `notification-connector_config` (recommended — used by global error handler on DLQ failure)
+- One or more `http-{target}-server_http-request_config` per downstream system
+
+**Outbound calls:** Same pattern as 3.1 — set `vars.targetApiParams` via DWL, then `flow-ref` to `{downstream-sys-api}-request-flow` (per-system named flow with static `config-ref`). See Section 9.
+
+**Error handling:** Per-message `on-error-continue` to prevent message loss. Failed messages are routed via the global error handler to `publish-to-dlq-sub-flow` (publishes to `${mq.dlq.queueName}` via `anypoint-mq:publish`) and `send-notification-sub-flow` (notification on DLQ publish). See Section 12.
+
+**Retry / idempotency:** `until-successful` for transient downstream HTTP errors. AUTO ack + circuit-breaker + reconnect on the subscriber. **Idempotency:** include a dedupe key in `attributes.properties` and check against an Object Store before processing (recommended for at-least-once delivery semantics).
+
+**Health check expectation:** Optional. The app has no HTTP listener; if a heartbeat is required, expose it via a separate scheduler-driven flow.
+
+**MUnit mock surface:** Mock the `anypoint-mq:subscriber` (set test event payload + `attributes.properties`); mock all downstream `http:request`; mock `anypoint-mq:publish` to DLQ; mock `module-notification:call-notification-api`.
+
+**Required env-property keys (subset of Section 7):**
+
+- `mq.url`, `mq.region`, `mq.environmentId`, `mq.app.clientId`, `mq.app.clientSecret`
+- `mq.queueName`, `mq.dlq.queueName`, `mq.maxLocalMessages`, `mq.connectionTimeout`
+- `mq.reconnection.frequency`, `mq.reconnection.attempts`
+- `mq.subscriber.circuitBreaker.tripTimeout`, `mq.subscriber.circuitBreaker.errorsThreshold`
+- `notification.api.host`, `notification.api.basePath`, `notification.api.clientId`, `notification.api.clientSecret`
+- For each downstream: same as 3.1
+- `logger.*` keys
+
+**When to choose:** Process-layer APIs consuming asynchronous events delivered via Anypoint MQ where consumer-driven processing is needed and DLQ + retry + circuit-breaker are required.
+
+**Reference Template (if available in this workspace):** `agents/develop/templates/mq-proc-api-template/`
+Scaffold keys: MQ subscriber main flow, `common-log-integration-error-details-sub-flow`, `responding-ack-sub-flow`, two-branch error handler (propagate for NACK / continue for ACK).
+Use as the skeleton when the Jira story is event-driven and consumes from Anypoint MQ.
+
+---
+
+### 3.3 Salesforce Pub/Sub Event App (exp API)
+
+**Trigger:**
+
+```xml
+<salesforce-pub-sub:subscribe-channel-listener doc:name="Subscribe channel listener"
+    config-ref="salesforce-pubsub_config"
+    channelName="${streaming.channel}"
+    eventBatchSize="${pubSub.batchsize}">
+    <salesforce-pub-sub:replay-option>
+        <salesforce-pub-sub:replay-id-from-object-store
+            osName="lastreplayId_Object_store" osKey="replayIdSub"/>
+    </salesforce-pub-sub:replay-option>
+</salesforce-pub-sub:subscribe-channel-listener>
+```
+
+**Main flow shape — `{event}-fetch-events-flow`:**
+
+```xml
+<flow name="{event}-fetch-events-flow"
+      maxConcurrency="${flow.maxConcurrency}"
+      initialState="${fetch.events.flow.initialState}">
+    <salesforce-pub-sub:subscribe-channel-listener doc:name="Subscribe channel listener"
+        config-ref="salesforce-pubsub_config"
+        channelName="${streaming.channel}"
+        eventBatchSize="${pubSub.batchsize}">
+        <salesforce-pub-sub:replay-option>
+            <salesforce-pub-sub:replay-id-from-object-store
+                osName="lastreplayId_Object_store" osKey="replayIdSub"/>
+        </salesforce-pub-sub:replay-option>
+    </salesforce-pub-sub:subscribe-channel-listener>
+    <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId" />
+    <ee:transform doc:name="Set Initial Vars">
+        <ee:message />
+        <ee:variables>
+            <ee:set-variable resource="dwls/p-initial-vars.dwl" variableName="initialVar" />
+        </ee:variables>
+    </ee:transform>
+    <flow-ref name="{event}-process-sub-flow"/>
+    <error-handler ref="global-error-handler"/>
+</flow>
+```
+
+**Context variable:** `vars.initialVar` — set via `dwls/p-initial-vars.dwl` (see Section 15). For Pub/Sub events, `entityDetails` is typically empty — set to `null` or omit object keys.
+
+**Required global configs in `global-config.xml`:**
+
+- `salesforce-pubsub_config` — `salesforce-pub-sub:config` with JWT auth (keystore, consumerKey, principal, audienceUrl, tokenUrl)
+- `lastreplayId_Object_store` — `objectstore:object-store`
+- `custom-logger-connector_config`
+- `azure-key-vault-properties-provider_config`
+- One or more `http-{target}-server_http-request_config` per downstream system
+- `notification-connector_config` (recommended)
+
+**Outbound calls:** Same pattern as 3.1 — set `vars.targetApiParams` via DWL, then `flow-ref` to `{downstream-sys-api}-request-flow` (per-system named flow with static `config-ref`). See Section 9.
+
+**Error handling:** Per-event `error-handler ref="global-error-handler"` prevents the event stream from stalling. The global handler logs the error and either does not advance `replayId` (so the event is replayed on next consume cycle) or routes to a DLQ topic. Notification on critical failure. See Section 12.
+
+**Retry / idempotency:** Replay-id from Object Store enables resume on restart. Reconnect on the subscriber. **Idempotency:** dedupe by `payload.event.replayId` (or business key) using Object Store.
+
+**Health check expectation:** Optional. App has no HTTP listener; if exposing health is required, use a separate scheduler-driven `http:listener` flow.
+
+**MUnit mock surface:** Mock `salesforce-pub-sub:subscribe-channel-listener` (inject test event payload); mock all downstream `http:request` and `salesforce:*` operations; mock `os:store` and `os:retrieve`.
+
+**Required env-property keys (subset of Section 7):**
+
+- Salesforce JWT: `sfl.keystore`, `sfl.tokenUrl`, `sfl.audienceUrl`, `sfl.consumerkey`, `sfl.principal`, `sfl.storepassword`, `sfl.certalias`
+- `streaming.channel`, `pubSub.batchsize`, `flow.maxConcurrency`, `fetch.events.flow.initialState`
+- For each downstream: same as 3.1
+- `logger.*` keys
+
+**When to choose:** Experience-layer APIs consuming Salesforce Platform Events / Change Data Capture (CDC) via the Pub/Sub API; need replay-id semantics and event-stream resumption on restart.
+
+**Reference Template (if available in this workspace):** `agents/develop/templates/sf-pubsub-exp-api-template/`
+Scaffold keys: `{event}-fetch-events-flow` with `salesforce-pub-sub:subscribe-channel-listener`, replay-id ObjectStore, `{event}-process-sub-flow`, DLQ publish, optional notification.
+Use as the skeleton when the Jira story subscribes to Salesforce Platform Events or CDC.
+
+---
+
+## 4. Project Structure & Output Location
+
+### Output Location
+
+- **Generate all new API projects** under the `generated-projects/` folder at the workspace root.
+- Path pattern: `generated-projects/{project-name}/` (e.g., `generated-projects/sf-http-sys-api-template/`).
+
+### Folder Hierarchy
+
+Generate this structure inside `generated-projects/{project-name}/src/main/mule/`:
+
+```
+generated-projects/{project-name}/
+├── pom.xml
+└── src/main/mule/
+    ├── {api-spec}.xml                # Main API flow + APIKit router (e.g., sf-http-sys-api-template.xml)
+    ├── implementation/               # Business logic flows
+    │   └── *.xml                     # Lower-case-hyphenated flow files
+    └── common/                       # Shared configuration and handlers
+        ├── global-config.xml         # All global elements (HTTP, connectors, APIKit, logger)
+        ├── global-error-handler.xml  # Centralized error handler
+        ├── common-connectivity.xml   # Shared flows (optional)
+        └── common-utility.xml        # Notification, DLQ, success-response (if needed)
+```
+
+### Key Rules
+
+- **Interface vs. logic separation:** Main API flow in root spec file; implementation in `implementation/` subfolder.
+- **Global elements:** ALL global configurations (HTTP Listener, connectors, APIKit, module-logger, validation) must be in `global-config.xml` only. **No config elements in implementation flow files.**
+- **Flow file names:** All lower-case, hyphenated (e.g., `fetch-data-sf-composite-api.xml`, `global-error-handler.xml`).
+
+---
+
+## 5. Naming Standards
+
+This section covers Global Config Naming, APIKit Flow Naming, Flow & Sub-flow Naming, and Flow & Component Design standards.
+
+### 5.1 Global Config Naming
+
+#### All config names must end with `_config`
+
+- **Rule:** Every `name` attribute on connector configs, listener configs, APIKit config, and similar elements must end with `_config`.
+- **Format:** `{description}_config` (use hyphens within the description part).
+- **Examples:**
+  - `api-listener_config` (HTTP listener)
+  - `sf-http-sys-api-template_http-listener_config` (not `_httpListenerConfig` — no camelCase)
+  - `sf-http-sys-api-template_config` (not `-config`)
+  - `custom-logger-connector_config` (not `_connectorConfig` — use hyphens, not underscores)
+  - `http-token-server_http-request_config` (HTTP request config)
+  - `azure-key-vault-properties-provider_config`
+
+> This ruleset supersedes the older `{description}_{type}` camelCase form (e.g., `customer-sapi_httpListenerConfig`) defined in `review-mule-global-config.mdc`.
+
+#### HTTP listener config naming
+
+- **Rule:** No camelCase; use hyphens to separate words; end with `_config`.
+- **Example:** `api-listener_config`, `sf-http-sys-api-template_http-listener_config`
+
+#### Apply to
+
+- `http:listener-config`
+- `apikit:config`
+- `module-logger:config`
+- `http:request-config`
+- `objectstore:object-store`
+- `configuration-properties` doc:name (e.g., `common-properties_config`, `env-properties_config`)
+- `api-gateway:autodiscovery` doc:name (e.g., `api-autodiscovery_config`)
+- Any other connector or config element with a `name` attribute
+
+### 5.2 APIKit Flow Naming
+
+#### Flow names include config name
+
+- **Rule:** APIKit-generated flow names use the pattern `{method}:{path}:{configName}`.
+- When the config name changes (e.g., to end with `_config`), all flow names and `flow-ref` references must be updated accordingly.
+- **Example:** `get:\ping:sf-http-sys-api-template-spec_config`, `post:\records:application\json:sf-http-sys-api-template-spec_config`
+
+#### Path parameters use parentheses in flow names
+
+- **Rule:** In Mule API spec flow names, path parameters use `()` (parentheses), not `{}` (curly braces).
+- RAML defines paths like `/patients/leads/{id}`; the corresponding Mule flow name uses `\(id)` in the path segment.
+- **Example:** `put:\records\(id):application\json:sf-http-sys-api-template-spec_config` (not `\{id\}`).
+- **uriParams:** `attributes.uriParams` uses the RAML parameter name (e.g. `attributes.uriParams.id` for path param `{id}`).
+
+#### Do not rename APIKit-generated flows
+
+- **Do not rename** flows generated by APIKit scaffolding. They follow `{method}:\{resource}:{configName}` (e.g., `get:\ping:sf-http-sys-api-template-spec_config`).
+- Replace hardcoded example response transforms with flow references to implementation sub-flows.
+
+### 5.3 Flow & Sub-flow Naming
+
+#### Suffixes
+
+- **Flows:** Suffixed with `-flow` (e.g. `{downstream-sys-api}-request-flow`, `sf-http-sys-api-template-main`).
+- **Sub-flows:** Suffixed with `-sub-flow` (e.g. `connectivity-error-handler-sub-flow`, `create-record-sub-flow`).
+- **Main flow:** `{api-spec}-main` (e.g. `sf-http-sys-api-template-main`).
+
+#### Variables
+
+- **Variables:** `camelCase` (e.g., `requestContext`, `httpStatus`, `targetApiParams`).
+
+### 5.4 Flow & Component Design
+
+- Every main flow must begin with **context-variable setup** (per pattern from §3): `requestContext` (HTTP listener APIs) or `initialVar` (event-driven flows), followed by a **Start Log**, and end with an **End Log** (using `module-logger`).
+- All loggers use `sourceSystem`/`targetSystem` from the chosen context variable (`vars.requestContext.*` or `vars.initialVar.*`).
+- Limit flow complexity: if a flow exceeds ~10 components, break logic into meaningful sub-flows.
+- **Message processors:** Never leave default Anypoint Studio names. Use descriptive names (e.g., `Set HTTP Status Code`, `Transform Composite Response`, `LOG BEFORE REQUEST`).
+- **`doc:name` AND `doc:id` are required on every element** — flow, sub-flow, and every processor/scope. `doc:id` must be a unique UUID-format string (e.g., `a1b2c3d4-0001-0001-0001-000000000001`). Missing either breaks Anypoint Studio's visual flow mapping. Example:
+
+```xml
+<ee:transform doc:name="FV Set Request Context" doc:id="a1b2c3d4-0001-0001-0001-000000000001">
+    <ee:message />
+    <ee:variables>
+        <ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+    </ee:variables>
+</ee:transform>
+```
+
+### 5.5 Configuration Element Placement
+
+- All global configuration elements must be defined in `src/main/mule/common/global-config.xml`.
+- No config elements in implementation flow files.
+
+---
+
+## 6. POM, RAML & Maven settings
+
+### 6.1 POM Parent
+
+- **Rule:** Every Mule application (`packaging` = `mule-application`) must include a `<parent>` element.
+- **Standard parent:** `mule-common-pom` from the organization's Maven repository.
+
+```xml
+<parent>
+    <groupId>260ebaee-d8f1-4739-bb12-b8db2f1568ca</groupId>
+    <artifactId>mule-common-pom</artifactId>
+    <version>1.0.9</version>
+</parent>
+```
+
+- Connectors (`mule-extension`) and BOMs may use a different parent as appropriate.
+
+### 6.2 RAML Dependency Alignment
+
+#### Use RAML version from pom.xml
+
+- **Rule:** The RAML spec version must match `api.raml.version` in the API project's `pom.xml`.
+- **Do not change `pom.xml`** (including `api.raml.version`) without explicit user consent.
+- **RAML spec `exchange.json`:** Set `version` to match `api.raml.version` from pom.xml.
+- **global-config.xml `apikit:config`:** The `api` resource version in the `resource::` URI must match the pom dependency version.
+
+```xml
+<!-- pom.xml -->
+<api.raml.version>1.0.1</api.raml.version>
+<dependency>
+  <artifactId>drupal-exp-api-spec</artifactId>
+  <version>${api.raml.version}</version>
+  ...
+</dependency>
+```
+
+```xml
+<!-- global-config.xml -->
+<apikit:config name="drupal-exp-api-spec_config"
+  api="resource::...:drupal-exp-api-spec:1.0.1:raml:zip:drupal-exp-api-spec.raml" />
+```
+
+### 6.3 Project Naming
+
+- Pattern: `{name}-{layer}-api` (e.g., `benefits-investigation-proc-api`). No `{region}` prefix per `review-api-design-standards.mdc`.
+- Max 42 characters for Runtime Manager deployment names.
+
+### 6.4 POM Structure
+
+- **Parent:** `mule-common-pom` (e.g., 1.0.9) — parent uses `mule-common-bom` internally.
+- **Organisation `groupId`:** `e0bc8c96-9dbd-48bc-915e-3e29577af6b3` — use for every Mule application project.
+- **Dependencies:** RAML spec from user; connectors via parent POM/BOM (no version in project POM).
+- **No `secureProperties`** in `mule-artifact.json` when using Azure Key Vault.
+
+### Canonical `mule-artifact.json`
+
+```json
+{
+    "minMuleVersion": "4.9.0",
+    "javaSpecificationVersions": [
+        "17"
+    ]
+}
+```
+
+No `secureProperties` field when using Azure Key Vault (credentials via vault, not AES encryption).
+
+### Canonical `pom.xml` skeleton (embedded — no external reference required)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>260ebaee-d8f1-4739-bb12-b8db2f1568ca</groupId>
+        <artifactId>mule-common-pom</artifactId>
+        <version>1.0.9</version>
+    </parent>
+
+    <groupId>e0bc8c96-9dbd-48bc-915e-3e29577af6b3</groupId>
+    <artifactId>{api-name}</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>mule-application</packaging>
+    <name>{api-name}</name>
+    <description>{api-description}</description>
+
+    <properties>
+        <app.name>${project.name}</app.name>
+        <app.version>v1</app.version>
+        <api.raml.version>1.0.0</api.raml.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    </properties>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
+        <testResources>
+            <testResource>
+                <directory>src/test/resources</directory>
+                <filtering>true</filtering>
+            </testResource>
+        </testResources>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+    <dependencies>
+        <!-- Test assertions -->
+        <dependency>
+            <groupId>org.mule.weave</groupId>
+            <artifactId>assertions</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Standard Mule modules (versions managed by parent BOM) -->
+        <dependency>
+            <groupId>org.mule.modules</groupId>
+            <artifactId>mule-validation-module</artifactId>
+            <classifier>mule-plugin</classifier>
+        </dependency>
+        <dependency>
+            <groupId>org.mule.modules</groupId>
+            <artifactId>mule-json-module</artifactId>
+            <classifier>mule-plugin</classifier>
+        </dependency>
+        <!-- RAML spec from Anypoint Exchange -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>{api-name}-spec</artifactId>
+            <version>${api.raml.version}</version>
+            <classifier>raml</classifier>
+            <type>zip</type>
+        </dependency>
+        <!-- Datadog log appender -->
+        <dependency>
+            <groupId>${project.parent.groupId}</groupId>
+            <artifactId>log4j-datadog-appender</artifactId>
+            <version>1.0.1</version>
+        </dependency>
+        <!--
+            Add pattern-specific connector dependencies below (versions managed by parent BOM):
+            Pattern 3.2 (Anypoint MQ):
+                <dependency><groupId>com.mulesoft.connectors</groupId><artifactId>anypoint-mq-connector</artifactId><classifier>mule-plugin</classifier></dependency>
+            Pattern 3.3 (Salesforce Pub/Sub):
+                <dependency><groupId>com.mulesoft.connectors</groupId><artifactId>mule-salesforce-connector</artifactId><classifier>mule-plugin</classifier></dependency>
+                <dependency><groupId>com.mulesoft.modules</groupId><artifactId>mule-objectstore-connector</artifactId><classifier>mule-plugin</classifier></dependency>
+        -->
+    </dependencies>
+</project>
+```
+
+### 6.5 Versioning
+
+- Semantic versioning: `major.minor.patch` (e.g., `1.0.16-SNAPSHOT`).
+
+### 6.6 RAML
+
+- API spec from Anypoint Exchange as dependency with `raml` classifier and `zip` type.
+- RAML spec version must match APIKit configuration.
+- Root XML file named `{api-spec-name}.xml`.
+
+### 6.7 Maven settings.xml
+
+- **No hardcoded Exchange credentials in POM** — use `settings.xml` for Anypoint Exchange and Mule EE authentication.
+- When creating or scaffolding projects, ensure `settings.xml` includes required servers (`anypoint-exchange-v3`, `eu-anypoint-exchange-v3`, `mulesoft-release-ee`) and repositories.
+- See `review-maven-settings.mdc`.
+
+**See:** `review-pom-maven-standards.mdc`, `review-api-design-standards.mdc`, `gen-raml-implementation.mdc`.
+
+---
+
+## 7. Configuration & Properties
+
+### Property Files
+
+- `config.properties` — unsecured properties common to all environments
+- **Mandatory env files:** Always create `config-dev.properties`, `config-qa.properties`, `config-uat.properties`, `config-prod.properties`, and `config-local.properties`.
+- **No `config-secure-{env}.properties`** when using Azure Key Vault — all secrets from vault.
+
+**Location:** `src/main/resources/properties/`
+
+### Loading
+
+- Use `configuration-properties` with `config-${mule.env}.properties` pattern.
+- Load common config via `config.properties`.
+
+### Common Keys (all env files)
+
+- **`api.id`** — API Manager autodiscovery ID. Include in every env file. Use placeholder if unknown for uat/prod.
+- **`logger.encryptionKey`** — `${azure-key-vault-properties-provider::secret::logger-encryption-key}` (or env-specific secret name)
+- **VM args comment:** Each env file should include a comment with VM args for the env (e.g. `-M-Dmule.env=dev -M-Dmule.encryption.key=  -M-Danypoint.platform.gatekeeper=disabled`).
+
+### Integration-Type-Specific Properties
+
+Identify underlying systems from the flow/architecture and add the corresponding property keys to env files. **All credential properties must use** `${azure-key-vault-properties-provider::secret::<replace-proper-value>}` — do NOT use actual secret names.
+
+- **HTTP Request** (downstream sys APIs): For each downstream system, add `{system}.host`, `{system}.basePath`, `{system}.client_id`, `{system}.client_secret` (credentials via placeholder). Use `{system}` naming (e.g. `{downstream-sys-api}`, `{another-sys-api}`). If health-check is used: `{system}.healthCheck.method`, `{system}.healthCheck.path`.
+- **SF Connector (OAuth JWT):** Add `sfl.keystore`, `sfl.tokenUrl`, `sfl.audienceUrl`, `sfl.consumerkey`, `sfl.principal`, `sfl.storepassword`, `sfl.certalias` (credentials via placeholder).
+- **Anypoint MQ:** Add `mq.url`, `mq.region`, `mq.environmentId`, `mq.app.clientId`, `mq.app.clientSecret` (credentials via placeholder), `mq.queueName`, `mq.dlq.queueName`, `mq.maxLocalMessages`, `mq.connectionTimeout`, `mq.reconnection.frequency`, `mq.reconnection.attempts`, `mq.subscriber.circuitBreaker.tripTimeout`, `mq.subscriber.circuitBreaker.errorsThreshold`.
+- **Notification API** (when notification connector enabled): Add `notification.api.host`, `notification.api.basePath`, `notification.api.clientId`, `notification.api.clientSecret` (credentials via placeholder).
+
+### Canonical `config-dev.properties` example (embedded — no external reference required)
+
+```properties
+# VM args: -M-Dmule.env=dev -M-Dmule.encryption.key= -M-Danypoint.platform.gatekeeper=disabled
+
+# API
+api.id=
+http.host=0.0.0.0
+http.port=8081
+http.basePath=/api/v1
+http.timeout=30000
+http.idleTimeout=30000
+
+# Outbound HTTP defaults
+request.timeout=30000
+request.idleTimeout=30000
+retry.attempts=3
+retry.interval=2000
+httpErrors=HTTP:CONNECTIVITY,HTTP:TIMEOUT,HTTP:SERVICE_UNAVAILABLE,HTTP:GATEWAY_TIMEOUT
+http.request.config_ref=
+
+# Transaction error integration
+ie.resolvedFlag=false
+ie.transactionType={describe-transaction-type}
+
+# Identity / context
+timezone=EST
+tier=Process
+sourceSystem=
+targetSystem=
+
+# Health check messages
+message.systemsAlive=alive
+message.systemsReady=ready
+message.systemsNotReady=not ready
+message.systemUp=up
+message.systemDown=down
+
+# Logger (Insulet Custom Logger Connector)
+logger.category={api-name}-${mule.env}
+logger.sensitiveKeyParts=name,email,mail,phone,mobile,ssn,sin,dob,birth,address,street,city,state,zip,postal,account,iban,routing,bank,card,cvv,userid,username,customerid,clientid,token,secret,password,authorization,cookie,apikey,key
+logger.safeKeys=requestId,traceId,correlationId
+logger.encryptionKey=${azure-key-vault-properties-provider::secret::logger-encryption-key}
+
+# Reconnection
+reconnection.frequency=2000
+reconnection.attempts=3
+
+# Example downstream HTTP system: token server
+token.host=
+token.port=443
+token.basePath=/oauth2
+token.path=/token
+token.client_id=${azure-key-vault-properties-provider::secret::na-{api}-token-client-id}
+token.client_secret=${azure-key-vault-properties-provider::secret::na-{api}-token-client-secret}
+
+# Example downstream sys API
+# {system}.host=
+# {system}.basePath=
+# {system}.client_id=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# {system}.client_secret=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# {system}.healthCheck.method=GET
+# {system}.healthCheck.path=/health-check
+
+# Notification API (when notification connector enabled)
+# notification.api.host=
+# notification.api.basePath=/notifications
+# notification.api.clientId=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# notification.api.clientSecret=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+
+# Anypoint MQ (Pattern 3.2 only)
+# mq.url=
+# mq.region=us-east-1
+# mq.environmentId=
+# mq.app.clientId=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# mq.app.clientSecret=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# mq.queueName=
+# mq.dlq.queueName=
+# mq.maxLocalMessages=10
+# mq.connectionTimeout=10000
+# mq.reconnection.frequency=2000
+# mq.reconnection.attempts=3
+# mq.subscriber.circuitBreaker.tripTimeout=60000
+# mq.subscriber.circuitBreaker.errorsThreshold=5
+
+# Salesforce JWT (Pattern 3.3, or any SF connector)
+# sfl.keystore=
+# sfl.tokenUrl=
+# sfl.audienceUrl=
+# sfl.consumerkey=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# sfl.principal=
+# sfl.storepassword=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+# sfl.certalias=
+```
+
+### Per-pattern key subsets (cross-reference to §3)
+
+- **3.1 HTTP Listener API:** common keys + per-downstream `{system}.*` blocks. Notification keys only when notification connector is enabled.
+- **3.2 Anypoint MQ Consumer:** common keys + `mq.*` block + per-downstream `{system}.*` blocks + notification keys (recommended).
+- **3.3 Salesforce Pub/Sub Event App:** common keys + Salesforce JWT (`sfl.*`) + Pub/Sub-specific (`streaming.channel`, `pubSub.batchsize`, `flow.maxConcurrency`, `fetch.events.flow.initialState`) + per-downstream `{system}.*` blocks + notification keys (recommended).
+
+### Rules
+
+- **No hardcoded values.** All hosts, ports, URLs, timeouts, retry counts must use `${prop.name}` syntax.
+- **Credentials:** Only from Azure Key Vault via `${azure-key-vault-properties-provider::secret::<replace-proper-value>}`. **Do NOT use actual secret names** — never hardcode real secret names in generated files. No `secureProperties` in `mule-artifact.json` when using vault.
+- **Property keys:** Lower-case, dot-separated (e.g., `http.port`, `sfl.consumerkey`, `reconnection.frequency`). System prefix for HTTP: `{system}.`; SF connector: `sfl.`; MQ: `mq.`; Notification: `notification.api.`
+- **Common defaults:** Include `retry.attempts`, `retry.interval`, `request.timeout`, `request.idleTimeout`, `http.host`, `http.port`, `http.timeout`, `http.idleTimeout`, `http.basePath`, `logger.*`, `httpErrors`, `timezone`, `sourceSystem`, `targetSystem`, health check messages. Add placeholders for external system host/port/endpoint.
+
+---
+
+## 8. Logger Configuration and Usage (Insulet Custom Logger Connector)
+
+### Logger config naming and attributes
+
+- **Config name:** `custom-logger-connector_config` (hyphens, not underscores).
+- **Required attributes:** `sensitiveKeyParts`, `safeKeys`, `encryptionKey` — all via `${...}` property placeholder syntax:
+  - `sensitiveKeyParts="${logger.sensitiveKeyParts}"`
+  - `safeKeys="${logger.safeKeys}"`
+  - `encryptionKey="${logger.encryptionKey}"`
+
+> **Why `${...}` and not `#[p()]`:** These attributes are evaluated at module-config load time, not at flow-execution time. Using `${...}` resolves the value through the Mule properties-provider chain (including Azure Key Vault) during deployment. `#[p('..')]` is a DataWeave expression that fires at runtime and will not work correctly in connector config elements.
+
+### Properties (config.properties)
+
+- `logger.category` — e.g. `{api-name}-${mule.env}`
+- `logger.sensitiveKeyParts` — comma-separated keys to mask (e.g. name, email, ssn, token, password)
+- `logger.safeKeys` — comma-separated keys that are safe to log in plain text. Always include standard tracking keys (`requestId,traceId,correlationId`); append app-specific non-PII entity IDs (e.g. `accountId,recordId,campaignName`) relevant to the given integration.
+- `logger.encryptionKey` — from secure vault (e.g. Azure Key Vault) in env-specific configs
+
+### Context variable per pattern (from §3)
+
+- **Pattern 3.1 (HTTP listener APIs):** Use `vars.requestContext` set in main flow via `dwls/v-request-context.dwl` before the APIKit router. All loggers use `sourceSystem="#[vars.requestContext.sourceSystem]"` and `targetSystem="#[vars.requestContext.targetSystem]"`.
+- **Patterns 3.2 (MQ consumer) and 3.3 (Pub/Sub):** Use `vars.initialVar` set via `dwls/p-initial-vars.dwl`. All loggers use `sourceSystem="#[vars.initialVar.sourceSystem]"`, `targetSystem="#[vars.initialVar.targetSystem]"`, and `entityDetails="#[vars.initialVar.entityDetails default null]"`.
+
+### Logger operations (no deprecated `module-logger:logger`)
+
+- **INFO / general logs:** `module-logger:build-log-without-payload` (no raw payload).
+- **DEBUG / payload logs:** `module-logger:build-log-with-encrypted-payload` (masked/encrypted only).
+- **Error logs:** `module-logger:build-error-log-with-encrypted-payload` (with `module-logger:body` for `vars.requestContext.originalPayload` or `vars.initialVar.originalPayload`) and `module-logger:build-error-log-without-payload`.
+
+> **CRITICAL — exact operation names:** The Insulet Custom Logger Connector operations do **NOT** have an `info-` infix. The correct names are exactly `build-log-without-payload`, `build-log-with-encrypted-payload`, `build-error-log-without-payload`, `build-error-log-with-encrypted-payload`. Using `build-info-log-*` is wrong and will cause a deployment failure.
+
+```xml
+<!-- CORRECT -->
+<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="..."
+    config-ref="custom-logger-connector_config"
+    message="put:\providers\accounts\(id)"
+    sourceSystem="#[vars.requestContext.sourceSystem]"
+    targetSystem="#[vars.requestContext.targetSystem]" />
+
+<!-- WRONG — do not use -->
+<!-- <module-logger:build-info-log-without-payload ... /> -->
+```
+
+### Operations reference
+
+| Operation | Level | Use Case |
+|-----------|-------|----------|
+| `build-log-without-payload` | INFO | Flow milestones, entry/exit logs — no payload |
+| `build-log-with-masked-payload` | DEBUG | Debugging with sensitive fields masked |
+| `build-log-with-encrypted-payload` | DEBUG | Full encrypted payload for compliance/audit |
+| `build-error-log-without-payload` | INFO/ERROR | Error context without payload |
+| `build-error-log-with-masked-payload` | DEBUG | Error with masked payload |
+| `build-error-log-with-encrypted-payload` | DEBUG | Error with encrypted payload |
+
+### Tracepoint
+
+Valid tracepoint values are a fixed enum. **Do NOT invent short-forms — only the values below are recognised by the Insulet Custom Logger Connector:**
+
+| Tracepoint value | When to use |
+|-----------------|-------------|
+| `FLOW_START` | First log inside any APIKit flow — entry to the flow |
+| `FLOW_END` | Last log in a flow or sub-flow — exit log |
+| `BEFORE_HTTP_REQUEST` | Encrypted log immediately **before** the `flow-ref` to a connectivity flow |
+| `AFTER_HTTP_REQUEST` | Encrypted log immediately **after** the `flow-ref` to a connectivity flow |
+| `APPLICATION_EVENT` | Business milestone log inside a flow (not HTTP-request-related) |
+| `EXCEPTION` | All error-handler log entries |
+
+> **INVALID short-forms — do NOT use:** `BEFORE`, `AFTER`, `END`, `START`, `ERROR`. These are not recognised and will cause incorrect log categorisation or connector failure.
+
+- **Exit / flow-end logs:** Use `tracepoint="FLOW_END"` (not `END`).
+- **Error handlers:** Use `tracepoint="EXCEPTION"`.
+- **Outbound HTTP request:** Use `tracepoint="BEFORE_HTTP_REQUEST"` before, `tracepoint="AFTER_HTTP_REQUEST"` after.
+
+### Mandatory: Before and after outbound API call (encrypted DEBUG logs)
+
+- **Rule:** For every sub-flow that makes an outbound HTTP/API call, add `module-logger:build-log-with-encrypted-payload` **before** and **after** the `flow-ref` to the connectivity flow.
+- **Before:** Log the request payload (e.g., `vars.targetApiParams.requestPayload`, or a pre-processed variable like `vars.leadRequestPayload`) with a descriptive message and `tracepoint="BEFORE_HTTP_REQUEST"`.
+- **After:** Log the response payload with `tracepoint="AFTER_HTTP_REQUEST"` and a descriptive message.
+- **Placement rule — calling sub-flow, NOT inside the connectivity flow:** The connectivity flow (`{downstream-sys-api}-request-flow` / `common-http-request-flow`) is a shared reusable flow. Adding logs inside it would duplicate them for every caller. The encrypted logs must bracket the `<flow-ref>` in the business sub-flow:
+
+```xml
+<!-- In the CALLING sub-flow — before the flow-ref -->
+<module-logger:build-log-with-encrypted-payload doc:name="LOG BEFORE REQUEST - {operation}"
+    config-ref="custom-logger-connector_config"
+    message="Invoking {downstream-system} for {operation}"
+    tracepoint="BEFORE_HTTP_REQUEST"
+    sourceSystem="#[vars.requestContext.sourceSystem]"
+    targetSystem="#[vars.requestContext.targetSystem]">
+    <module-logger:body><![CDATA[#[output application/json --- vars.targetApiParams.requestPayload default {}]]]></module-logger:body>
+</module-logger:build-log-with-encrypted-payload>
+
+<flow-ref name="{downstream-sys-api}-request-flow"
+    doc:name="{downstream-sys-api}-request-flow ({operation})"
+    target="{operationResponse}" />
+
+<!-- In the CALLING sub-flow — after the flow-ref -->
+<!-- When target= is used the response is in vars.{operationResponse}; without target= it is in payload -->
+<module-logger:build-log-with-encrypted-payload doc:name="LOG AFTER REQUEST - {operation}"
+    config-ref="custom-logger-connector_config"
+    message="Response from {downstream-system} for {operation}"
+    tracepoint="AFTER_HTTP_REQUEST"
+    sourceSystem="#[vars.requestContext.sourceSystem]"
+    targetSystem="#[vars.requestContext.targetSystem]">
+    <module-logger:body><![CDATA[#[output application/json --- vars.{operationResponse} default payload]]]></module-logger:body>
+</module-logger:build-log-with-encrypted-payload>
+```
+
+- **Apply to:** POST, PUT, and other endpoints that call downstream APIs. **Exclude:** ping, health-check, and similar read-only health endpoints — these do not need `BEFORE_HTTP_REQUEST` / `AFTER_HTTP_REQUEST` outbound-call logs because they make no business-logic HTTP calls.
+- **Important — ping and health-check still require standard entry/exit logs:** The exclusion above applies **only** to the `BEFORE_HTTP_REQUEST` / `AFTER_HTTP_REQUEST` encrypted payload logs. Every APIKit flow — including `GET /ping` and `GET /health-check` — must still have an INFO `build-log-without-payload` entry logger (tracepoint defaults to `FLOW_START`) and an INFO `build-log-without-payload` exit logger with `tracepoint="FLOW_END"`. See Section 10 for canonical shapes.
+- **For endpoints without outbound API (stub):** Add before/after logs for the inbound request and outbound response to maintain consistency and aid debugging.
+
+### MUnit tests
+
+- When flow-ref'ing directly to API flows (bypassing main flow), set `requestContext` (Pattern 3.1) or `initialVar` (Patterns 3.2, 3.3) via `munit:variable` before the flow-ref.
+
+---
+
+## 9. Common HTTP Connectivity (Outbound)
+
+### Connectivity flow pattern
+
+- **File:** `src/main/mule/common/common-connectivity.xml` — one named request flow per downstream system.
+- **Flow naming:** `{downstream-sys-api}-request-flow` — one flow per downstream system, no shared generic flow.
+- **Purpose:** Encapsulates outbound HTTP request with retry, before/after logging, and error handling for a specific downstream system.
+- **Config ref:** Each named flow has a **static** `config-ref="{downstream-sys-api}_http-request_config"`. Do NOT use a dynamic MEL expression for `config-ref` — Mule 4 resolves this attribute at deploy time, not at runtime. Using `#[vars.httpRequestConfigRef ...]` will not work.
+
+### Required variables before flow-ref
+
+- **`targetApiParams`** — set via a `v-set-target-api-params-*.dwl` file; complete canonical structure:
+  ```
+  {
+    requestMethod:   string,       // HTTP verb (GET, POST, PUT, PATCH, DELETE)
+    requestPath:     string,       // URI path; use /{param} placeholders mapped via uriParams
+    requestProtocol: string,       // "HTTP" or "HTTPS"
+    requestHost:     string,       // resolved from property (e.g. Mule::p('sfl.crm.host'))
+    requestPort:     string,       // resolved from property (e.g. Mule::p('sfl.crm.port'))
+    requestBasePath: string,       // resolved from property (e.g. Mule::p('sfl.crm.basePath'))
+    requestPayload:  object|array, // outbound body; empty object {} for GET/DELETE
+    headers?:        object,       // x-request-id, client_id, client_secret, sourceSystem, targetSystem
+    uriParams?:      object,       // URI template variables (e.g. { id: vars.accountId })
+    queryParams?:    object        // optional query string parameters
+  }
+  ```
+- **Usage:** Caller sets `vars.targetApiParams` via the DWL transform then `flow-ref`s to `{downstream-sys-api}-request-flow`. No `httpRequestConfigRef` variable is needed or used.
+
+### DWL file references in ee:transform
+
+> **CRITICAL — `resource=` attribute, never `${file::...}`:** DWL files must always be referenced using the `resource=` attribute on `ee:set-variable` and `ee:set-payload`. The `${file::dwls/...}` Spring property placeholder inside CDATA is **not** equivalent and will not load the DWL at runtime.
+
+```xml
+<!-- CORRECT: resource= attribute on ee:set-variable -->
+<ee:transform doc:name="FV Set targetApiParams" doc:id="...">
+    <ee:message />
+    <ee:variables>
+        <ee:set-variable resource="dwls/v-targetApiParams-sfl-crm-persona-sys-api.dwl"
+            variableName="targetApiParams" />
+    </ee:variables>
+</ee:transform>
+
+<!-- CORRECT: resource= attribute on ee:set-payload -->
+<ee:transform doc:name="DW Set Response" doc:id="...">
+    <ee:message>
+        <ee:set-payload resource="dwls/p-update-provider-response.dwl" />
+    </ee:message>
+</ee:transform>
+
+<!-- WRONG — do not use ${file::...} -->
+<!--
+<ee:set-variable variableName="targetApiParams">
+    <![CDATA[${file::dwls/v-targetApiParams-sfl-crm-persona-sys-api.dwl}]]>
+</ee:set-variable>
+-->
+```
+
+### Component naming
+
+- All processors and scopes must have descriptive `doc:name` (no default Studio names like "Retry", "Try").
+- Flow-ref doc:name: "Flow Reference to {target-sub-flow-name}".
+
+### Flow structure
+
+- `until-successful` with `${retry.attempts}` and `${retry.interval}`.
+- `try` with `http:request` using a **static** `config-ref="{downstream-sys-api}_http-request_config"`.
+- Inner error-handler: `on-error-propagate` for `${httpErrors}`, `on-error-continue` for others — both set `vars.success = false` and `vars.errorDetails = error`.
+- After `until-successful`: `flow-ref` to `check-for-raise-error-sub-flow`.
+- Outer error-handler: `on-error-propagate` type `ANY` — LOG ERROR (without payload).
+- **No LOG BEFORE/AFTER in the connectivity flow itself.** The encrypted `BEFORE_HTTP_REQUEST` and `AFTER_HTTP_REQUEST` logs must be placed in the **calling sub-flow** around the `<flow-ref>` to this connectivity flow. See §8 "Mandatory: Before and after outbound API call" for the canonical pattern.
+
+> Add one named flow per downstream system. Do NOT share a single flow across systems using a dynamic `config-ref`.
+
+> **`http:success-status-code-validator` — do NOT add inside `until-successful`:** Non-2xx HTTP responses must propagate as typed `HTTP:*` errors (e.g. `HTTP:NOT_FOUND`, `HTTP:SERVICE_UNAVAILABLE`) so the inner `on-error-propagate type="${httpErrors}"` can classify them correctly for retry, and so `customErrors.dwl` can map them to the right HTTP status. Adding `<http:success-status-code-validator>` collapses all non-2xx into `HTTP:BAD_REQUEST`, which defeats this classification. The validator is only appropriate for calls made outside a retry scope where you need explicit status-code gating.
+
+### Canonical `{downstream-sys-api}-request-flow` (embedded)
+
+```xml
+<!-- common-connectivity.xml — one flow per downstream system -->
+<!-- NOTE: Do NOT add LOG BEFORE/AFTER here. Those encrypted logs belong in the CALLING sub-flow,
+     bracketing the flow-ref to this flow. See §8 for the canonical calling-sub-flow pattern. -->
+<flow name="{downstream-sys-api}-request-flow" doc:name="{downstream-sys-api}-request-flow">
+    <until-successful maxRetries="${retry.attempts}" millisBetweenRetries="${retry.interval}" doc:name="Retry">
+        <try doc:name="Try Outbound Request">
+            <http:request
+                method="#[vars.targetApiParams.requestMethod]"
+                path="#[vars.targetApiParams.requestPath]"
+                config-ref="{downstream-sys-api}_http-request_config"
+                doc:name="REQUEST {downstream-sys-api}"
+                sendCorrelationId="ALWAYS">
+                <http:body><![CDATA[#[vars.targetApiParams.requestPayload]]]></http:body>
+                <http:headers><![CDATA[#[vars.targetApiParams.headers default {}]]]></http:headers>
+                <http:uri-params><![CDATA[#[vars.targetApiParams.uriParams default {}]]]></http:uri-params>
+                <http:query-params><![CDATA[#[vars.targetApiParams.queryParams default {}]]]></http:query-params>
+            </http:request>
+            <ee:transform doc:name="FV Set Success = true, Error = null">
+                <ee:message />
+                <ee:variables>
+                    <ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+                    <ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+            <error-handler>
+                <on-error-propagate type="${httpErrors}" doc:name="On Error Propagate (Retry)">
+                    <ee:transform doc:name="FV Set Success = false, Error Details">
+                        <ee:message />
+                        <ee:variables>
+                            <ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+                            <ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+                        </ee:variables>
+                    </ee:transform>
+                </on-error-propagate>
+                <on-error-continue doc:name="On Error Continue (Non-Retryable)">
+                    <ee:transform doc:name="FV Set Success = false, Error Details">
+                        <ee:message />
+                        <ee:variables>
+                            <ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+                            <ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+                        </ee:variables>
+                    </ee:transform>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </until-successful>
+    <flow-ref doc:name="Flow Reference to check-for-raise-error-sub-flow"
+        name="check-for-raise-error-sub-flow" />
+    <error-handler>
+        <on-error-propagate type="ANY" doc:name="On Error Propagate">
+            <module-logger:build-error-log-without-payload
+                doc:name="LOG ERROR"
+                config-ref="custom-logger-connector_config"
+                message="{downstream-sys-api} request failed"
+                logLevel="ERROR"
+                tracepoint="EXCEPTION"
+                sourceSystem="#[vars.requestContext.sourceSystem]"
+                targetSystem="#[vars.requestContext.targetSystem]"
+                entityDetails="#[vars.requestContext.entityDetails default null]"
+                errorType='#[(vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN")]'
+                errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+                cause='#[vars.errorDetails.cause.message default ""]'
+                errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+        </on-error-propagate>
+    </error-handler>
+</flow>
+```
+
+### `connectivity-error-handler-sub-flow`
+
+- **Sub-flow name:** `connectivity-error-handler-sub-flow` (suffix `-sub-flow` per naming conventions).
+- **Placement:** Defined in `global-error-handler.xml`.
+- **Behavior:** Choice on `!vars.success` → raise `APP:CONNECTIVITY_FAILED` with `vars.errorDetails.description`.
+
+```xml
+<sub-flow name="connectivity-error-handler-sub-flow">
+    <choice doc:name="CHECK for Success == false">
+        <when expression="#[!vars.success default false]">
+            <raise-error doc:name="RAISE APP:CONNECTIVITY_FAILED"
+                type="APP:CONNECTIVITY_FAILED"
+                description='#[vars.errorDetails.description default error.detailedDescription default ""]' />
+        </when>
+    </choice>
+</sub-flow>
+```
+
+### HTTP request config
+
+- **Naming:** `{downstream-sys-api}_http-request_config` (end with `_config`).
+- **Placement:** `global-config.xml`.
+- **Properties:** `{target}.host`, `{target}.port`, `{target}.basePath` for each downstream system. No shared `config-ref` property — each system has its own named config.
+- **Include only configs in use:** Define HTTP request configs only for targets the API calls. Remove unused configs and their properties from all env config files.
+
+### Config properties (config-{env}.properties)
+
+- **Mandatory in all env configs:** `logger.encryptionKey=${azure-key-vault-properties-provider::secret::logger-encryption-key}`
+- **Outbound targets (examples):** Add only properties for targets the API calls. Example for a token server: `token.host`, `token.port`, `token.basePath`, `token.path`; Azure keys: `token.clientId`, `token.clientSecret` via `na-{api}-token-*` secret naming.
+- **Azure Key Vault naming:** `${azure-key-vault-properties-provider::secret::<secret-name>}`; API-specific secrets use `na-{api}-{context}-{key}` (e.g. `na-{api-name}-token-client-id`).
+
+### Error log DWL (`p-set-error-log-original-request.dwl`)
+
+- Uses `vars.requestContext` and `vars.targetApiParams`.
+- Outputs `originalRequest` with method, requestPath, queryParams, uriParams, body (when present).
+- Prefers `targetApiParams` for outbound request details; falls back to `requestContext` for inbound.
+
+### Multi-Target HTTP Connectivity
+
+#### Per-system named flows
+
+- **Rule:** Create one named request flow per downstream system in `common-connectivity.xml`. Each flow has a **static** `config-ref` pointing to that system's `http:request-config`.
+- **Config selection:** Callers set `vars.targetApiParams` via a `v-set-target-api-params-*.dwl` file, then `flow-ref` to `{downstream-sys-api}-request-flow`.
+- **Example:** `create-record-sub-flow` sets `vars.targetApiParams` via `v-set-target-api-params-sf-object.dwl` then calls `flow-ref name="{downstream-sys-api}-request-flow"`.
+- **Placement:** One named flow per downstream system in `common-connectivity.xml`.
+
+#### Pass-through inbound auth
+
+- **Rule:** When calling downstream APIs that require JWT/Authorization, pass the inbound Authorization header in `targetApiParams.headers`.
+- **DWL:** `"Authorization": vars.requestContext.headers.Authorization default vars.requestContext.headers.authorization default ""`
+- **Example use case:** `{exp-api}` POST `/records` → `{proc-api}` (JWT validated at gateway; header forwarded to downstream).
+
+#### Request pre-processing before outbound call
+
+- **Rule:** When the outbound payload must be transformed before the HTTP call, store the result in a variable first.
+- **Pattern:** `ee:set-variable variableName="{resourceName}RequestPayload" resource="dwls/p-{resource}-request-merge.dwl"`; then `v-{resource}-api-params.dwl` references `vars.{resourceName}RequestPayload default payload`.
+- **Reason:** Keeps targetApiParams DWL simple and reusable.
+
+---
+
+## 10. Health Check & Readiness
+
+- **When the API has downstream HTTP dependencies** (process APIs calling sys APIs): Implement `health-check-ready-sub-flow` (or `healthcheck-ready-sub-flow`) using `scatter-gather` to call each downstream system's `/health-check` endpoint via the existing common-connectivity HTTP request flows.
+- Use `v-targetApiParams-{system}-healthcheck.dwl` per downstream system to set `requestMethod`, `requestPath`, `host`, `basePath`, etc. from properties (e.g. `{system}.healthCheck.method`, `{system}.healthCheck.path`).
+- Use `on-error-continue` per route to set payload to `{ apiName, status: message.systemDown }` on failure.
+- Use `p-set-readiness-response-success.dwl` (or equivalent) to aggregate scatter-gather results into `{ apiName, version, correlationId, timestamp, dependencies[], status }`.
+- **When the API has no downstream HTTP dependencies** (e.g. sys APIs): Use a simple readiness flow (e.g. check internal dependency like Salesforce via `get-timestamp-sub-flow`) and `p-set-readiness-response.dwl` with dependencies if applicable.
+
+### Canonical `GET /ping` APIKit flow (embedded)
+
+Every HTTP Listener API must expose a `GET /ping` liveness endpoint. The APIKit-generated flow follows the standard entry + set-payload + exit log shape — no outbound HTTP calls, no BEFORE/AFTER_HTTP_REQUEST logs.
+
+```xml
+<flow name="get:\ping:{api-spec}_config">
+    <module-logger:build-log-without-payload doc:name="LOG ENTRY"
+        config-ref="custom-logger-connector_config"
+        message="GET /ping"
+        sourceSystem="#[vars.requestContext.sourceSystem]"
+        targetSystem="#[vars.requestContext.targetSystem]" />
+    <ee:transform doc:name="DW Set Aliveness Response">
+        <ee:message>
+            <ee:set-payload resource="dwls/p-set-liveness-response.dwl" />
+        </ee:message>
+    </ee:transform>
+    <module-logger:build-log-without-payload doc:name="LOG EXIT"
+        config-ref="custom-logger-connector_config"
+        message="GET /ping"
+        tracepoint="FLOW_END"
+        sourceSystem="#[vars.requestContext.sourceSystem]"
+        targetSystem="#[vars.requestContext.targetSystem]" />
+</flow>
+```
+
+### Canonical `GET /health-check` APIKit flow (embedded)
+
+Every HTTP Listener API must expose a `GET /health-check` readiness endpoint. The flow delegates all logic to `health-check-ready-sub-flow` and wraps it with standard entry/exit logs.
+
+```xml
+<flow name="get:\health-check:{api-spec}_config">
+    <module-logger:build-log-without-payload doc:name="LOG ENTRY"
+        config-ref="custom-logger-connector_config"
+        message="GET /health-check"
+        sourceSystem="#[vars.requestContext.sourceSystem]"
+        targetSystem="#[vars.requestContext.targetSystem]" />
+    <flow-ref doc:name="Flow Reference to health-check-ready-sub-flow" name="health-check-ready-sub-flow" />
+    <module-logger:build-log-without-payload doc:name="LOG EXIT"
+        config-ref="custom-logger-connector_config"
+        message="GET /health-check"
+        tracepoint="FLOW_END"
+        sourceSystem="#[vars.requestContext.sourceSystem]"
+        targetSystem="#[vars.requestContext.targetSystem]" />
+</flow>
+```
+
+### Canonical `health-check-ready-sub-flow` (embedded)
+
+```xml
+<sub-flow name="health-check-ready-sub-flow">
+    <scatter-gather doc:name="Send request to all downstream systems">
+        <route>
+            <try doc:name="Try {system-a} Health Check">
+                <ee:transform doc:name="{system-a} Healthcheck Parameters">
+                    <ee:message />
+                    <ee:variables>
+                        <ee:set-variable resource="dwls/v-targetApiParams-{system-a}-healthcheck.dwl" variableName="targetApiParams" />
+                    </ee:variables>
+                </ee:transform>
+                <flow-ref doc:name="Flow Reference to {system-a}-request-flow ({system-a} health-check)" name="{system-a}-request-flow" />
+                <ee:transform doc:name="Normalize {system-a} success response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    apiName: "{system-a}",
+    status: payload.status default p('message.systemUp')
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+                <error-handler>
+                    <on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+                        <ee:transform doc:name="Set {system-a} status down">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    apiName: "{system-a}",
+    status: p('message.systemDown')
+}]]></ee:set-payload>
+                            </ee:message>
+                        </ee:transform>
+                    </on-error-continue>
+                </error-handler>
+            </try>
+        </route>
+        <route>
+            <try doc:name="Try {system-b} Health Check">
+                <ee:transform doc:name="{system-b} Healthcheck Parameters">
+                    <ee:message />
+                    <ee:variables>
+                        <ee:set-variable resource="dwls/v-targetApiParams-{system-b}-healthcheck.dwl" variableName="targetApiParams" />
+                    </ee:variables>
+                </ee:transform>
+                <flow-ref doc:name="Flow Reference to {system-b}-request-flow ({system-b} health-check)" name="{system-b}-request-flow" />
+                <ee:transform doc:name="Normalize {system-b} success response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    apiName: "{system-b}",
+    status: payload.status default p('message.systemUp')
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+                <error-handler>
+                    <on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+                        <ee:transform doc:name="Set {system-b} status down">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    apiName: "{system-b}",
+    status: p('message.systemDown')
+}]]></ee:set-payload>
+                            </ee:message>
+                        </ee:transform>
+                    </on-error-continue>
+                </error-handler>
+            </try>
+        </route>
+    </scatter-gather>
+    <ee:transform doc:name="DW Set Readiness Response">
+        <ee:message>
+            <ee:set-payload resource="dwls/p-set-readiness-response-success.dwl" />
+        </ee:message>
+    </ee:transform>
+    <module-logger:build-log-without-payload doc:name="Log Healthcheck result"
+        config-ref="custom-logger-connector_config"
+        message="#[output application/json --- if(payload.status != p('message.systemsReady')) &quot;health check unsuccessful&quot; else &quot;health check successful&quot;]"
+        tracepoint="APPLICATION_EVENT"
+        sourceSystem="#[vars.requestContext.sourceSystem]"
+        targetSystem="#[vars.requestContext.targetSystem]" />
+</sub-flow>
+```
+
+### Canonical `dwls/v-targetApiParams-{system}-healthcheck.dwl` (embedded)
+
+```dwl
+%dw 2.0
+output application/json
+---
+{
+    "host": Mule::p("{system}.host"),
+    "basePath": Mule::p("{system}.basePath") default "/",
+    "requestMethod": Mule::p("{system}.healthCheck.method"),
+    "requestPath": Mule::p("{system}.healthCheck.path"),
+    "headers": {
+        "x-correlation-id": correlationId,
+        "client_id": Mule::p('{system}.client_id'),
+        "client_secret": Mule::p('{system}.client_secret'),
+        "sourceSystem": Mule::p('app.name'),
+        "targetSystem": Mule::p('targetSystem')
+    },
+    "uriParams": {},
+    "queryParams": {},
+    "requestPayload": {}
+}
+```
+
+### Canonical `dwls/p-set-readiness-response-success.dwl` (embedded)
+
+```dwl
+%dw 2.0
+import * from dw::core::Arrays
+output application/json
+var statusValue = if ((payload pluck (value, key, index) -> (value.payload default value).status)
+    some (($ != p('message.systemUp')) and ($ != p('message.systemsReady')))
+) p('message.systemsNotReady') else p('message.systemsReady')
+---
+{
+    apiName: p('app.name'),
+    version: p('app.version'),
+    correlationId: correlationId,
+    timestamp: now() >> p('timezone'),
+    dependencies: (payload pluck {
+        "name": ($.payload.apiName default $.payload.name default $.apiName default $.name),
+        "status": ($.payload default $).status
+    }),
+    status: statusValue
+}
+```
+
+### Pattern applicability
+
+- **3.1 HTTP Listener API:** Both `GET /ping` (liveness) and `GET /health-check` (readiness) endpoints required.
+- **3.2 Anypoint MQ Consumer:** No HTTP listener; readiness is optional. If exposed, use a separate scheduler-driven flow.
+- **3.3 Salesforce Pub/Sub Event App:** Same as 3.2 — readiness is optional and exposed via a separate listener flow if required.
+
+---
+
+## 11. Notification Connector (`send-notification-sub-flow`)
+
+- The `send-notification-sub-flow` must use **`module-notification:call-notification-api`** (not `module-notification:send`).
+- Use `module-notification:http-body` — JSON from `vars.notificationInputBody` (built by `v-notification-input-body.dwl`).
+- Use `module-notification:http-headers` — `x-correlation-id`, `client_id`, `client_secret` from properties.
+- Add `notification.api.clientId` and `notification.api.clientSecret` to required properties when notification is enabled.
+
+### Canonical `send-notification-sub-flow` (embedded)
+
+```xml
+<sub-flow name="send-notification-sub-flow">
+    <try>
+        <ee:transform doc:name="Notification Input Body">
+            <ee:message />
+            <ee:variables>
+                <ee:set-variable resource="dwls/v-notification-input-body.dwl" variableName="notificationInputBody" />
+            </ee:variables>
+        </ee:transform>
+        <module-logger:build-log-with-masked-payload doc:name="Sending notification"
+            config-ref="custom-logger-connector_config"
+            message="Sending notification through connector"
+            tracepoint="BEFORE_HTTP_REQUEST"
+            sourceSystem="#[vars.initialVar.sourceSystem]"
+            targetSystem="#[vars.initialVar.targetSystem]"
+            entityDetails="#[vars.initialVar.entityDetails default null]">
+            <module-logger:body><![CDATA[#[output application/json --- vars.notificationInputBody]]]></module-logger:body>
+        </module-logger:build-log-with-masked-payload>
+        <module-notification:call-notification-api doc:name="Send Error Details" config-ref="notification-connector_config">
+            <module-notification:http-body><![CDATA[#[output application/json --- vars.notificationInputBody]]]></module-notification:http-body>
+            <module-notification:http-headers><![CDATA[#[output application/json --- {
+                'x-correlation-id': correlationId,
+                'client_id': p('notification.api.clientId'),
+                'client_secret': p('notification.api.clientSecret')
+            }]]]></module-notification:http-headers>
+        </module-notification:call-notification-api>
+        <module-logger:build-log-without-payload doc:name="Notification Sent"
+            config-ref="custom-logger-connector_config"
+            message="Notification sent successfully"
+            tracepoint="AFTER_HTTP_REQUEST"
+            sourceSystem="#[vars.initialVar.sourceSystem]"
+            targetSystem="#[vars.initialVar.targetSystem]"
+            entityDetails="#[vars.initialVar.entityDetails default null]"/>
+        <error-handler>
+            <on-error-continue doc:name="On Error Continue">
+                <module-logger:build-error-log-with-encrypted-payload doc:name="LOG ERROR"
+                    config-ref="custom-logger-connector_config"
+                    message="Error sending notification"
+                    logLevel="ERROR" tracepoint="EXCEPTION"
+                    sourceSystem="#[vars.initialVar.sourceSystem]"
+                    targetSystem="#[vars.initialVar.targetSystem]"
+                    entityDetails="#[vars.initialVar.entityDetails default null]"
+                    cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+                    errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+                    errorDescription='#[vars.errorDetails.detailedDescription default error.description default ""]'
+                    errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]">
+                    <module-logger:body><![CDATA[#[output application/json ---
+{
+    error: (vars.errorDetails.description default error.description default "")
+}]]]></module-logger:body>
+                </module-logger:build-error-log-with-encrypted-payload>
+            </on-error-continue>
+        </error-handler>
+    </try>
+</sub-flow>
+```
+
+---
+
+## 12. Error Handling
+
+### Global Error Handler
+
+- Define a global error handler in `global-error-handler.xml`.
+- Reference it from the main API flow using `defaultErrorHandler-ref="global-error-handler"`.
+- Use `on-error-continue` to return structured error responses; use `on-error-propagate` in sub-flows to bubble errors up.
+
+### Custom Error Mapping
+
+- Define mappings in `errors/customErrors.dwl` (e.g., `SALESFORCE:CONNECTIVITY` → 503, `MULE:UNKNOWN` → 500).
+- Use `module-error-handler-plugin` with `custom-errors` referencing the DWL file.
+
+### Error Handler Logging
+
+- Error handlers must include **two** `module-logger` entries:
+  1. **INFO/ERROR** — `build-error-log-without-payload` (category `com.insulet.general`) — error context without payload
+  2. **DEBUG** — `build-error-log-with-masked-payload` or `build-error-log-with-encrypted-payload` — protected payload for triage
+- **`tracepoint="EXCEPTION"` is required** on all error handler log entries.
+- Both entries must include `sourceSystem` and `targetSystem`.
+
+### Structured Error Response
+
+- Standardize error responses. Payload must be JSON with `correlationId`, `status`, `code`, `message`.
+
+### Pattern-specific notes (cross-reference §3)
+
+- **3.1 HTTP Listener API:** `on-error-continue` at the global handler returns the structured error response. HTTP status pulled from `errors/customErrors.dwl`.
+- **3.2 Anypoint MQ Consumer:** Per-message `on-error-continue` to prevent message loss; failed messages routed via `publish-to-dlq-sub-flow` (publishes to `${mq.dlq.queueName}`) and `send-notification-sub-flow` (notification on DLQ failure).
+- **3.3 Salesforce Pub/Sub Event App:** Per-event `error-handler ref="global-error-handler"` prevents event-stream stall. Replay-id is not advanced for unrecoverable failures; notification on critical failure.
+
+### Canonical `global-error-handler` (embedded)
+
+```xml
+<error-handler name="global-error-handler">
+    <on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+        <module-error-handler-plugin:process-error doc:name="Process Error"
+            error="#[vars.errorDetails default error]" useGeneratedError="false">
+            <module-error-handler-plugin:custom-errors><![CDATA[#[${file::errors/customErrors.dwl}]]]></module-error-handler-plugin:custom-errors>
+        </module-error-handler-plugin:process-error>
+        <set-variable variableName="httpStatus" value="#[attributes.httpStatus]" doc:name="Set HTTP Status Code" />
+        <module-logger:build-error-log-with-encrypted-payload doc:name="Log Error"
+            config-ref="custom-logger-connector_config"
+            message='#[output application/json --- (attributes.httpStatus default "500") ++ " " ++ (payload.error.reason default "Internal Server Error")]'
+            logLevel="ERROR" tracepoint="EXCEPTION"
+            sourceSystem="#[(vars.requestContext.sourceSystem default vars.initialVar.sourceSystem) default p('sourceSystem')]"
+            targetSystem="#[(vars.requestContext.targetSystem default vars.initialVar.targetSystem) default p('targetSystem')]"
+            cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+            errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+            errorDescription='#[error.description default ""]'
+            errorCode='#[vars.httpStatus default "500"]'>
+            <module-logger:body><![CDATA[#[(vars.requestContext default vars.initialVar default {}).originalPayload default { code: attributes.httpStatus, message: attributes.errorLog }]]]></module-logger:body>
+        </module-logger:build-error-log-with-encrypted-payload>
+        <ee:transform doc:name="Set Error Variables">
+            <ee:message />
+            <ee:variables>
+                <ee:set-variable variableName="errorCode"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.httpStatus default 500]]></ee:set-variable>
+                <ee:set-variable variableName="errorMessage"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.errorLog default ""]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <!-- For Patterns 3.2 and 3.3 only: -->
+        <!-- <flow-ref name="send-notification-sub-flow"/> -->
+        <!-- <flow-ref name="publish-to-dlq-sub-flow"/> -->
+    </on-error-continue>
+</error-handler>
+```
+
+### Canonical `errors/customErrors.dwl` (embedded)
+
+This is the complete, production-ready canonical — use it verbatim for every new project. Replace `{api-name}` in the JSDoc with the actual API name. For Pattern 3.3 (Salesforce) add the Salesforce-specific block documented below.
+
+```dwl
+/**
+ * Custom error handling mappings for {api-name}.
+ */
+%dw 2.0
+output application/json
+import * from module_error_handler_plugin::common
+
+var previousError = do {
+    var nested = [
+        error.childErrors..errorMessage.payload,        // Composite (Scatter-Gather, etc.)
+        error.suppressedErrors..errorMessage.payload,   // Until-Successful
+        error.exception.errorMessage.typedValue         // Standard Error — must be last
+    ] dw::core::Arrays::firstWith !isEmpty($)
+    ---
+    if (nested is Array)
+        toString(nested map (toString($)) distinctBy $)
+    else
+        toString(nested)
+}
+
+// Reusable function to extract and format Mule composite routing errors
+fun extractRoutingErrors(errorMessage: Any): String =
+    // Safely check if it's a string and not empty using the 'is' operator
+    if (errorMessage is String and !isEmpty(errorMessage))
+        (
+            // Explicitly cast to String so the compiler allows splitBy
+            ((errorMessage as String) splitBy "\n")
+                filter ($ contains "Route")
+                map ((line) -> trim(line replace /^.*Exception:\s/ with ""))
+        ) joinBy ", " default "No route-specific errors identified"
+    else
+        "Invalid or missing error message data"
+---
+{
+    "APP:CONNECTIVITY_FAILED": {
+        code: 503,
+        reason: "Service Unavailable",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:INTERNAL_SERVER_ERROR": {
+        code: 500,
+        reason: "Internal Server Error",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:BAD_REQUEST": {
+        code: 400,
+        reason: "Bad Request",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:UNAUTHORIZED": {
+        code: 401,
+        reason: "Unauthorized",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:NOT_FOUND": {
+        code: 404,
+        reason: "Not Found",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:CONNECTIVITY": {
+        code: 503,
+        reason: "Service Unavailable",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:SERVICE_UNAVAILABLE": {
+        code: 503,
+        reason: "Service Unavailable",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "HTTP:TIMEOUT": {
+        code: 504,
+        reason: "Gateway Timeout",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "MULE:RETRY_EXHAUSTED": {
+        code: 503,
+        reason: "Service Unavailable",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    },
+    "MULE:COMPOSITE_ROUTING": {
+        code: 500,
+        reason: "Internal Server Error",
+        message: extractRoutingErrors(if (!isEmpty(previousError)) previousError else error.description)
+    },
+    "MULE:UNKNOWN": {
+        code: error.exception.errorMessage.attributes.statusCode default 500,
+        reason: error.exception.errorMessage.attributes.reasonPhrase default "Internal Server Error",
+        message: if (!isEmpty(previousError)) previousError else error.description
+    }
+}
+```
+
+> **Pattern 3.3 (Salesforce) additions:** When the API uses a Salesforce connector, add these entries to the map above, before `MULE:UNKNOWN`:
+>
+> ```dwl
+>     "SALESFORCE:CONNECTIVITY": {
+>         code: 503,
+>         reason: "Service Unavailable",
+>         message: if (!isEmpty(previousError)) previousError else error.description
+>     },
+>     "SALESFORCE:NOT_FOUND": {
+>         code: 404,
+>         reason: "Not Found",
+>         message: if (!isEmpty(previousError)) previousError else error.description
+>     },
+>     "SALESFORCE:TIMEOUT": {
+>         code: 504,
+>         reason: "Gateway Timeout",
+>         message: if (!isEmpty(previousError)) previousError else error.description
+>     },
+>     "SALESFORCE:LIMIT_EXCEEDED": {
+>         code: 429,
+>         reason: "Too Many Requests",
+>         message: if (!isEmpty(previousError)) previousError else error.description
+>     },
+>     "SALESFORCE:INVALID_INPUT": {
+>         code: 400,
+>         reason: "Bad Request",
+>         message: if (!isEmpty(previousError)) previousError else error.description
+>     },
+> ```
+
+> **Rule:** `MULE:COMPOSITE_ROUTING` **must always be present** when `scatter-gather` is used (e.g., `health-check-ready-sub-flow`). Omitting it causes unhandled 500 errors on scatter-gather failures.
+
+### Async Error Logging Sub-flow (`log-transaction-error-sub-flow`)
+
+- **Rule:** When the global error handler fires an async flow-ref to post transaction errors to a downstream system, that sub-flow's HTTP call **must** be wrapped in `<try>/<on-error-continue>` so that any failure to reach the error-logging endpoint is silently swallowed — it must never surface a new error and must never interrupt the original error response.
+- **Why:** Without this guard, a network failure or 5xx from the error-logging endpoint re-raises an error inside `on-error-continue`, which can mask the original error or cause an unexpected 500 response to the client.
+
+```xml
+<!-- common-utility.xml -->
+<sub-flow name="log-transaction-error-sub-flow" doc:name="log-transaction-error-sub-flow">
+    <try doc:name="Try Post Transaction Error">
+        <ee:transform doc:name="FV Set targetApiParams for Transaction Error">
+            <ee:message />
+            <ee:variables>
+                <ee:set-variable resource="dwls/v-targetApiParams-transaction-error.dwl" variableName="targetApiParams" />
+            </ee:variables>
+        </ee:transform>
+        <flow-ref name="common-http-request-flow" doc:name="Flow Reference to common-http-request-flow (POST transaction error)" />
+        <error-handler>
+            <on-error-continue type="ANY" doc:name="On Error Continue (swallow error-logging failures)">
+                <module-logger:build-error-log-without-payload doc:name="LOG ERROR - Transaction Error Logging Failed"
+                    config-ref="custom-logger-connector_config"
+                    message="Failed to post transaction error — swallowed to protect original error response"
+                    logLevel="ERROR"
+                    tracepoint="EXCEPTION"
+                    sourceSystem="#[(vars.requestContext.sourceSystem default vars.initialVar.sourceSystem) default p('sourceSystem')]"
+                    targetSystem="#[(vars.requestContext.targetSystem default vars.initialVar.targetSystem) default p('targetSystem')]" />
+            </on-error-continue>
+        </error-handler>
+    </try>
+</sub-flow>
+```
+
+---
+
+
+
+### Reconnection Strategy
+
+- Configure reconnection on all external connectors (DB, HTTP Request, Salesforce, Anypoint MQ).
+- Use properties: `reconnection.frequency`, `reconnection.attempts` (e.g., 2000ms, 3 attempts).
+
+```xml
+<reconnect frequency="${reconnection.frequency}" count="${reconnection.attempts}" />
+```
+
+### Transient Errors
+
+- Use `until-successful` for retryable operations.
+- Define transient error types in properties (e.g., `httpErrors`) and use `on-error-propagate` for retries.
+- Set `success` and `errorDetails` variables for downstream decision-making; use the `connectivity-error-handler-sub-flow` pattern (Section 9) to raise `APP:CONNECTIVITY_FAILED` when appropriate.
+- **Common-connectivity pattern:** `until-successful` → try (HTTP request → set success/errorDetails) → `flow-ref` to `connectivity-error-handler-sub-flow` → `build-log-with-encrypted-payload` BEFORE/AFTER_HTTP_REQUEST. The full canonical XML is embedded in Section 9.
+
+### Per-pattern resilience notes (cross-reference §3)
+
+- **3.1 HTTP Listener API:** `until-successful` retry on `${httpErrors}` for outbound calls. Caller idempotency at gateway / API contract level.
+- **3.2 Anypoint MQ Consumer:** Subscriber-level circuit breaker (`mq.subscriber.circuitBreaker.tripTimeout` / `errorsThreshold`) plus reconnection (`mq.reconnection.frequency` / `attempts`); AUTO ack mode; DLQ for unrecoverable messages.
+- **3.3 Salesforce Pub/Sub Event App:** Reconnect on `subscribe-channel-listener`; replay-id-from-object-store enables event-stream resumption on restart; `flow.maxConcurrency` bounds concurrent processing.
+
+---
+
+## 14. Security
+
+- **No clear-text secrets** in any file. Use Azure Key Vault or AES encryption.
+- **Encryption keys:** Never in properties or source code. Use secure vault or VM args in Studio Run Config for local only.
+- **Logger config:** `sensitiveKeyParts` and `safeKeys` in global connector config; `encryptionKey` from secure vault.
+- **Secure properties:** If using AES encryption, declare in `mule-artifact.json` `secureProperties`. If using vault, not required.
+
+**See:** `review-security-standards.mdc` for full checklist.
+
+---
+
+## 15. DataWeave Standards
+
+### Externalization
+
+- **All DataWeave scripts must be externalized** into `.dwl` files under `src/main/resources/dwls/`.
+- Inline DataWeave in Mule XML should be avoided. Only trivial single-line expressions (e.g., `vars.httpStatus`) may remain inline.
+
+### File Naming
+
+- Lower-case-hyphenated with `.dwl` extension (e.g., `p-composite-query-request.dwl`, `v-request-context.dwl`).
+- **Prefix convention:** `v-` for scripts that set variables; `p-` for scripts that set payload.
+
+### Error Mappings
+
+- Custom error mapping DWL files go under `src/main/resources/errors/` (e.g., `customErrors.dwl`).
+- Map error types to HTTP status codes, reasons, and messages.
+
+### Ping/Alive Response DWLs
+
+- **`p-set-liveness-response.dwl`** (ping): Must include `apiName`, `version`, `correlationId`, `timestamp`, `status`. Use `Mule::p('app.name')`, `Mule::p('app.version')`, `correlationId`, `now() >> Mule::p('timezone')`, `Mule::p('message.systemsAlive')`.
+- **`p-set-readiness-response-success.dwl`** (health-check with dependencies): Must include `apiName`, `version`, `correlationId`, `timestamp`, `dependencies` (array from scatter-gather payload), `status` (derived from dependency statuses).
+
+### Canonical `dwls/v-request-context.dwl` (Pattern 3.1)
+
+```dwl
+%dw 2.0
+output application/java
+---
+{
+    "headers": attributes.headers default "",
+    "queryParams": attributes.queryParams default "",
+    "uriParams": attributes.uriParams default "",
+    "originalPayload": payload default "",
+    "requestPath": attributes.requestPath,
+    "sourceSystem": attributes.headers.sourceSystem default Mule::p('sourceSystem'),
+    "targetSystem": Mule::p('targetSystem')
+}
+```
+
+### Canonical `dwls/p-initial-vars.dwl` (Patterns 3.2 and 3.3)
+
+```dwl
+%dw 2.0
+output application/java
+var originalPayload = payload default {}
+---
+{
+    "headers": attributes.headers default "",
+    "queryParams": attributes.queryParams default "",
+    "uriParams": attributes.uriParams default "",
+    "originalPayload": payload default "",
+    "sourceSystem": attributes.headers.sourceSystem default attributes.properties.SourceSystem default Mule::p('sourceSystem'),
+    "targetSystem": attributes.headers.targetSystem default attributes.properties.TargetSystem default Mule::p('targetSystem'),
+    "entityDetails": if (originalPayload is Object) {
+        // Replace with entity-specific keys, e.g.:
+        // SourceID__c: originalPayload.SourceID__c default "",
+        // ExtPatientID__c: originalPayload.ExtPatientID__c default ""
+    } else null
+}
+```
+
+### Canonical `dwls/p-set-liveness-response.dwl`
+
+```dwl
+%dw 2.0
+output application/json
+---
+{
+    apiName: Mule::p('app.name'),
+    version: Mule::p('app.version'),
+    correlationId: correlationId,
+    timestamp: now() >> Mule::p('timezone'),
+    status: Mule::p('message.systemsAlive')
+}
+```
+
+The canonical `p-set-readiness-response-success.dwl` is embedded in Section 10.
+
+---
+
+## 16. Consent Merge Pattern (Experience APIs)
+
+### Merge incoming consents with mandatory internal consents
+
+- **Rule:** When an API must merge incoming consents with mandatory internal consents (per spec), use a dedicated DWL.
+- **Steps:**
+  1. Add `source: "web"` (or appropriate value) to each incoming consent.
+  2. Define mandatory consent purposes (e.g., `["Transactional SMS", "Transactional Email"]`).
+  3. Add mandatory consents only if not already present in incoming.
+  4. Output merged payload for downstream.
+- **Example DWL pattern:** `p-{resource}-request-consent-merge.dwl` — adapt for any endpoint that merges incoming consents.
+- **Reference:** See the project-specific spec in `agents/develop/examples/` for the applicable consent rules.
+
+---
+
+## 17. Response Mapping from Downstream
+
+### Capture downstream fields before set-payload
+
+- **Rule:** When the RAML response structure differs from the downstream response, capture required fields in variables before overwriting payload.
+- **Pattern:** In the same `ee:transform`, set `vars.leadId = payload.leadId` (or similar) in `ee:variables` first; then `ee:set-payload` uses `vars.leadId` in the response DWL.
+- **HTTP status for create:** POST create operations must use `vars.httpStatus = 201` (Created), not 200.
+- **Placeholder:** Add `response.leadId` (or equivalent) in config.properties for fallback when downstream does not return the field.
+
+---
+
+## 18. MUnit Testing
+
+### Ask before implementing MUnit tests
+
+- **Rule:** When creating or updating an API endpoint (flow, sub-flow, RAML operation), the agent MUST ask the user: "Should I create or update MUnit tests for this endpoint?"
+- **Implement MUnit tests only if the user confirms** (e.g., "yes", "proceed", "please add tests").
+- Do not automatically add or modify MUnit tests without explicit user approval.
+
+### Requirements (when implementing)
+
+- **One test suite per flow file** under `src/test/munit/`.
+- **At least 70% code coverage** per suite and overall.
+- **At least one positive and one negative test** per flow.
+- **Mock all external calls** (HTTP, DB, Salesforce, Anypoint MQ, Pub/Sub). Never make real calls in unit tests.
+- Run `mvn clean test` before committing.
+
+### Per-pattern mock surface (cross-reference §3)
+
+- **3.1 HTTP Listener API:** Mock every `http:request` to downstream systems. When flow-ref'ing directly to API flows (bypassing main flow), set `vars.requestContext` via `munit:variable`.
+- **3.2 Anypoint MQ Consumer:** Mock the `anypoint-mq:subscriber` (set test event payload + `attributes.properties`); mock all downstream `http:request`; mock `anypoint-mq:publish` to DLQ; mock `module-notification:call-notification-api`.
+- **3.3 Salesforce Pub/Sub Event App:** Mock `salesforce-pub-sub:subscribe-channel-listener` (inject test event); mock all downstream `http:request` and `salesforce:*` operations; mock `os:store` and `os:retrieve` for replay-id Object Store.
+
+**See:** `review-munit-testing.mdc` for full checklist.
+
+---
+
+## 19. Execution Procedure for Agent
+
+When asked to build, generate, scaffold, or implement Mule flows, sub-flows, or DataWeave scripts:
+
+1. **Bootstrap (§1):** Add `log4j-datadog-appender` to POM; create canonical `log4j2.xml` with all three `com.insulet.*` AsyncLogger categories and both `file` and `DATADOG` appenders.
+2. **Ask** user decisions per Section 2 — **integration pattern question first**.
+3. **Look up the chosen pattern in §3** to determine: context variable (`requestContext` vs `initialVar`), error-handling style, retry/idempotency strategy, MUnit mock surface, required env-property keys, and health-check expectations.
+4. **Plan** the file structure and property definitions for the chosen pattern.
+5. **Generate** the XML and DataWeave code implementing these rules. Create the project under `generated-projects/{project-name}/`.
+6. **Validate** against the Section 20 Self-Validation Checklist.
+7. **Transformations:** Implement only after user provides flow/sequence/arch diagram or explicit requirements; otherwise scaffold structure only.
+
+**Also read** applicable `review-*.mdc` and `gen-*.mdc` files for detailed checklists.
+
+---
+
+## 20. Self-Validation Checklist
+
+Run this checklist before declaring generation complete. Every item must pass.
+
+### Bootstrap & Logging
+
+- [ ] `log4j2.xml` declares all three AsyncLogger categories: `com.insulet.general`, `com.insulet.maskedpayload`, `com.insulet.encryptedpayload`.
+- [ ] `log4j2.xml` DataDogLog4jAppender includes both `host="${hostName}"` and `apiLayer="${sys:anypoint.platform.visualizer.layer}"` attributes.
+- [ ] `log4j2.xml` AsyncRoot includes both `<AppenderRef ref="file"/>` and `<AppenderRef ref="DATADOG"/>`.
+- [ ] `packages` attribute on `<Configuration>` is `com.insulet.datadog,org.apache.logging.log4j`.
+- [ ] `com.insulet.encryptedpayload` is `level="DEBUG"` in non-PROD `log4j2.xml`.
+- [ ] PROD `log4j2.xml` has all three `com.insulet.*` categories at WARN.
+- [ ] No use of the deprecated `module-logger:logger` operation; all logs use `build-log-*` / `build-error-log-*` operations.
+- [ ] `module-logger:config` attributes (`sensitiveKeyParts`, `safeKeys`, `encryptionKey`) use `${...}` property placeholder notation — not `#[p('...')]`.
+- [ ] All loggers include `sourceSystem` and `targetSystem` attributes.
+- [ ] Error-handler logger entries include `tracepoint="EXCEPTION"`.
+- [ ] Outbound HTTP calls have a `BEFORE_HTTP_REQUEST` encrypted DEBUG log before and an `AFTER_HTTP_REQUEST` encrypted DEBUG log after the flow-ref.
+- [ ] `GET /ping` flow has an INFO entry log and an INFO exit log with `tracepoint="FLOW_END"`.
+- [ ] `GET /health-check` flow has an INFO entry log and an INFO exit log with `tracepoint="FLOW_END"`.
+- [ ] `health-check-ready-sub-flow` ends with an INFO `build-log-without-payload` with `tracepoint="APPLICATION_EVENT"` reporting healthcheck success/failure.
+
+### Naming
+
+- [ ] Every global config `name` attribute ends with `_config`.
+- [ ] No camelCase in config names; words separated by hyphens.
+- [ ] Flows end with `-flow`; sub-flows end with `-sub-flow`; main flow is `{api-spec}-main`.
+- [ ] APIKit-generated flows have not been renamed.
+- [ ] Path parameters in flow names use `()` parentheses (not `{}`).
+- [ ] Variables are `camelCase`.
+- [ ] No default Studio names on processors.
+
+### Configuration & Properties
+
+- [ ] All five env property files exist: `config-dev.properties`, `config-qa.properties`, `config-uat.properties`, `config-prod.properties`, `config-local.properties`.
+- [ ] No hardcoded values; all hosts/ports/URLs/timeouts use `${prop.name}`.
+- [ ] All credentials reference Azure Key Vault via `${azure-key-vault-properties-provider::secret::<replace-proper-value>}`. No real secret names hardcoded.
+- [ ] No `secureProperties` in `mule-artifact.json` when using Azure Key Vault.
+- [ ] No `config-secure-{env}.properties` files.
+
+### Structure & Placement
+
+- [ ] All global config elements live in `src/main/mule/common/global-config.xml`.
+- [ ] No config elements in implementation flow files.
+- [ ] Implementation flows live under `src/main/mule/implementation/`.
+- [ ] Main API flow lives in the root `src/main/mule/{api-spec}.xml`.
+- [ ] All DataWeave scripts are in `src/main/resources/dwls/`; only trivial single-line expressions remain inline.
+
+### Pattern-specific
+
+- [ ] **3.1:** `vars.requestContext` set in main flow before APIKit router; ping + health-check endpoints implemented.
+- [ ] **3.2:** Subscriber has reconnect, prefetch, and circuit-breaker; per-message `on-error-continue`; DLQ flow + notification flow present.
+- [ ] **3.3:** `replay-id-from-object-store` configured; `flow.maxConcurrency` set; per-event `error-handler ref="global-error-handler"`.
+
+### Errors & Responses
+
+- [ ] Global error handler exists in `global-error-handler.xml` and is referenced by the main flow.
+- [ ] `errors/customErrors.dwl` has a file-level JSDoc comment block.
+- [ ] `errors/customErrors.dwl` `previousError` variable includes all three nested sources with inline comments (`childErrors` → Composite, `suppressedErrors` → Until-Successful, `typedValue` → Standard Error — must be last).
+- [ ] `errors/customErrors.dwl` includes `extractRoutingErrors()` helper function with inline comments.
+- [ ] `errors/customErrors.dwl` maps all required error types: `APP:CONNECTIVITY_FAILED` (503), `HTTP:INTERNAL_SERVER_ERROR` (500), `HTTP:BAD_REQUEST` (400), `HTTP:UNAUTHORIZED` (401), `HTTP:NOT_FOUND` (404), `HTTP:CONNECTIVITY` (503), `HTTP:SERVICE_UNAVAILABLE` (503), `HTTP:TIMEOUT` (504), `MULE:RETRY_EXHAUSTED` (503), `MULE:COMPOSITE_ROUTING` (500 via `extractRoutingErrors`), `MULE:UNKNOWN` (dynamic).
+- [ ] `errors/customErrors.dwl` includes Salesforce error types when Pattern 3.3 is used: `SALESFORCE:CONNECTIVITY`, `SALESFORCE:NOT_FOUND`, `SALESFORCE:TIMEOUT`, `SALESFORCE:LIMIT_EXCEEDED`, `SALESFORCE:INVALID_INPUT`.
+- [ ] Structured error response includes `correlationId`, `status`, `code`, `message`.
+- [ ] Error handler log entries include both INFO (without payload) and DEBUG (encrypted payload).
+
+### Outbound Connectivity
+
+- [ ] One named request flow per downstream system exists in `common-connectivity.xml`, each with a **static** `config-ref`. No dynamic `config-ref` via MEL expression.
+- [ ] Callers set `vars.targetApiParams` (via a `v-set-target-api-params-*.dwl` file) before `flow-ref` to the named request flow. No `httpRequestConfigRef` variable is set or used.
+- [ ] `connectivity-error-handler-sub-flow` exists in `global-error-handler.xml` and raises `APP:CONNECTIVITY_FAILED`.
+
+### Portability
+
+- [ ] Generated artifacts contain no paths referencing local sample-project folders (the rule itself is fully self-contained).
+
+---
+
+## 21. Release Notes
+
+### Initial Release — Generic template-based, standalone ruleset
+
+- All implementation standards, canonical XML/DWL/properties snippets, and integration pattern catalog are embedded inline — no external reference projects required.
+- All API-naming examples use generic template-based placeholders (`sf-http-sys-api-template`, `{downstream-sys-api}`, `{another-sys-api}`) rather than project-specific names.
+- The POM/APIKit canonical snippet (§6.4) retains a concrete `artifactId` example to illustrate the exact Anypoint Exchange dependency format.
+- Outbound HTTP connectivity uses the per-system named flow pattern (`{downstream-sys-api}-request-flow` with a static `config-ref`). Dynamic MEL expressions for `config-ref` are explicitly disallowed (Mule 4 resolves this attribute at deploy time, not runtime).
+- Reference templates (§3.1–3.3) are marked optional — they provide scaffolding skeletons when available in the workspace but are not required for the ruleset to function.
+- `com.insulet.encryptedpayload` AsyncLogger correctly set to `level="DEBUG"` in all canonical `log4j2.xml` snippets.
+- All `review-*.mdc` companion files listed in §22 are located in `agents/review/rules/` and remain authoritative for their respective domains.
+
+---
+
+## 22. References
+
+| Source | Purpose |
+|-------|---------|
+| `review-development-flow.mdc` | Pre-PR checklist, code review gate |
+| `review-mule-flow-naming.mdc` | Flow and processor naming |
+| `review-mule-global-config.mdc` | Global config structure (superseded by §5 for naming) |
+| `review-error-handling.mdc` | Error handler patterns |
+| `review-logging-standards.mdc` | Insulet Custom Logger details |
+| `review-dataweave-standards.mdc` | DWL externalization |
+| `review-properties-config.mdc` | Property file structure |
+| `review-security-standards.mdc` | Secret management |
+| `review-munit-testing.mdc` | MUnit requirements |
+| `review-pom-maven-standards.mdc` | POM and artifact naming |
+| `review-maven-settings.mdc` | Maven settings.xml and Exchange auth |
+| `review-api-design-standards.mdc` | RAML design |
+| `gen-raml-implementation.mdc` | RAML generation |
+| `intent-gen-mule.mdc` | Mule generation procedure |
+| `agents/develop/examples/` | API-specific specs and templates (Confluence exports — e.g., Development Flow, Naming Standards, Technical Best Practices, Insulet Custom Logger Connector) |

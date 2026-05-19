@@ -1,0 +1,43 @@
+---
+description: Enforces property file naming, structure, and content conventions during code reviews
+globs: **/src/main/resources/properties/**
+alwaysApply: false
+---
+
+# Property & Configuration File Standards
+
+## Required Property Files
+Every project must have at minimum:
+- `config.properties` — unsecured properties common to **all** environments
+- `config-{env}.properties` — unsecured properties per environment (local, dev, qa, uat, prod)
+
+Secrets are managed via a secure vault (e.g., Azure Key Vault); `config-secure-{env}.properties` is not used.
+
+## File Location
+- All property files must be under `src/main/resources/properties/`
+- Sub-folders by environment are acceptable for additional mapping files (e.g., `properties/dev/`)
+
+## File Naming
+- Use `.properties` format (not `.yaml` unless project-wide decision)
+- Environment identifiers: `local`, `dev`, `qa`, `uat`, `prod`
+- Pattern: `config-{env}.properties`
+
+## Property Naming
+- Property keys must be **lower case, dot-separated** with hyphens where needed
+- Example: `common.api.client-id`, `http.port`, `usps.basePath`
+- Group related properties with common prefixes
+
+## Environment Loading
+- Properties loaded via `config-${mule.env}.properties` pattern using `configuration-properties`
+- The `mule.env` property determines which environment config to load
+
+## Security
+- **No clear-text passwords or secrets** in any properties file
+- Sensitive values must be fetched from a secure vault (e.g., Azure Key Vault) or encrypted using AES CBC
+- When a secure vault provider is used, declaring properties in `mule-artifact.json` `secureProperties` is **not required**
+
+## Review Checklist
+- [ ] All required config files exist for each environment
+- [ ] No secrets or passwords in plain text
+- [ ] Property keys follow lower-case dot-separated naming
+- [ ] Files are in `src/main/resources/properties/`

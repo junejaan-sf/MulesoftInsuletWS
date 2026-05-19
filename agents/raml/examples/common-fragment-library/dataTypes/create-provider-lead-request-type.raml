@@ -1,0 +1,81 @@
+#%RAML 1.0 DataType
+type: object
+properties:
+  firstName:
+    type: string
+    required: true
+  lastName:
+    type: string
+    required: true
+  street:
+    type: string
+    required: false
+  city:
+    type: string
+    required: false
+  state:
+    type: string
+    required: false
+  stateCode:
+    type: string
+    required: false
+  postalCode:
+    type: string
+    required: false
+  email:
+    type: string
+    required: false
+  hcpType:
+    type: string
+    required: false
+  degreeDescription:
+    type: string
+    required: false
+  otherDegreeInfo:
+    type: string
+    required: false
+  npi:
+    type: string
+    required: false
+  licenseNumber:
+    type: string
+    required: false
+  inquiryDetails:
+    type: string
+    required: false
+  drupalURL:
+    type: string
+    required: false
+  statusReason:
+    type: string
+    required: false
+  practiceName:
+    type: string
+    required: false
+  phone:
+    type: string
+    required: false
+  question:
+    type: string
+    required: false
+  cKey:
+    type: string
+    required: false
+  leadSource:
+    type: string
+    required: false
+  contactMethods:
+    type: string
+    required: false
+  consents:
+    type: array
+    required: false
+    items:
+      type: object
+      properties:
+        purposeName:
+          type: string
+          required: false
+        status:
+          type: string
+          required: false

@@ -1,0 +1,41 @@
+---
+description: Triggers a comprehensive code review using all review-* rulesets when the user asks to review, assess, evaluate, audit, inspect, analyze, check, or validate code
+globs: 
+alwaysApply: false
+---
+
+# Code Review Intent
+
+When the user's request contains any of these intent keywords — **review**, **assess**, **evaluate**, **audit**, **inspect**, **analyze**, **check**, **validate** — treat it as a request to perform a comprehensive code review.
+
+## Review Procedure
+
+1. **Read all `review-*.mdc` files** from the `agents/review/rules/` directory — these are the code review rulesets
+2. **Ignore** any `gen-*.mdc` files — those are for code generation, not review
+3. **Read all source files** in the target project/directory specified by the user
+4. **Evaluate the code** against every applicable `review-*.mdc` ruleset based on file globs
+
+## Output Format
+
+Present findings in a structured report with:
+
+### Summary Table
+A table showing each ruleset, its pass/fail status, and count of findings by severity.
+
+### Findings by Severity
+- **CRITICAL** — compliance, security, or operational gaps that must be fixed before merge
+- **MAJOR** — correctness or standards violations that should be fixed before merge
+- **MINOR** — optional improvements, cosmetic, or housekeeping items
+
+Each finding must include:
+- A unique ID (e.g., C1, M1, m1)
+- The ruleset it belongs to
+- The specific file(s) and line(s) affected
+- The relevant code snippet
+- A clear description of the violation and the required fix
+
+### What's Done Well
+Highlight areas where the code follows standards correctly.
+
+### Recommended Priority
+Group findings into priority tiers with suggested timelines.

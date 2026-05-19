@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+	xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+		http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+		http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<munit:config name="get-records-test-suite.xml"/>
+
+	<!-- =========================================================
+	     TEST 5 — GET /records SUCCESS
+	     SF query returns records → mapped to API response array.
+	     ========================================================= -->
+	<munit:test name="get-records-success" description="Test get records success — SF query returns results, mapped to API response" tags="SUCCESS">
+		<munit:behavior>
+			<munit-tools:spy processor="salesforce:query" doc:name="Spy Salesforce Query">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="Execute SF Query"/>
+				</munit-tools:with-attributes>
+				<munit-tools:before-call>
+					<munit-tools:assert-that
+						expression="#[vars.queryPayload.query]"
+						is="#[MunitTools::notNullValue()]"
+						message="queryPayload.query must be set before SF query"
+						doc:name="Assert queryPayload set"/>
+				</munit-tools:before-call>
+			</munit-tools:spy>
+			<munit-tools:mock-when doc:name="Mock salesforce:query success" processor="salesforce:query">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Query" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/get-records-test-suite/technical-outbound/sf-query-records-response.json')]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+		<munit:execution>
+			<munit:set-event doc:name="Set Get Records Request">
+				<munit:payload value="#[output application/json --- {}]"/>
+				<munit:attributes value="#[output application/java --- { queryParams: { status: 'New' }, uriParams: {}, headers: {} }]"/>
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- { headers: {}, queryParams: { status: 'New' }, uriParams: {}, originalPayload: '', requestPath: '/api/records', sourceSystem: 'Test', targetSystem: 'Salesforce' }]"/>
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="get:\records:sf-http-sys-api-template-spec-config" name="get:\records:sf-http-sys-api-template-spec-config" doc:id="22220001-bbbb-4444-cccc-dd0000000001"/>
+		</munit:execution>
+		<munit:validation>
+			<munit-tools:assert-that doc:name="Assert response is non-empty array" expression="#[sizeOf(payload)]" is="#[MunitTools::greaterThan(0)]"/>
+			<munit-tools:assert-that doc:name="Assert first record id" expression="#[payload[0].id]" is="#[MunitTools::equalTo('a005e000000XxXXAAZ')]"/>
+			<munit-tools:assert-that doc:name="Assert first record name" expression="#[payload[0].name]" is="#[MunitTools::equalTo('Test Record')]"/>
+		</munit:validation>
+	</munit:test>
+
+	<!-- =========================================================
+	     TEST 6 — GET /records NOT FOUND
+	     SF query returns empty array → raises APP:RECORD_NOT_FOUND → 404.
+	     ========================================================= -->
+	<munit:test name="get-records-not-found" description="Test get records when SF query returns no results — raises APP:RECORD_NOT_FOUND, 404 returned" tags="ERROR">
+		<munit:behavior>
+			<munit-tools:mock-when doc:name="Mock salesforce:query empty result" processor="salesforce:query">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Query" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- []]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+		<munit:execution>
+			<munit:set-event doc:name="Set Get Records Request">
+				<munit:payload value="#[output application/json --- {}]"/>
+				<munit:attributes value="#[output application/java --- { queryParams: { externalId: 'NONEXISTENT' }, uriParams: {}, headers: {} }]"/>
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- { headers: {}, queryParams: { externalId: 'NONEXISTENT' }, uriParams: {}, originalPayload: '', requestPath: '/api/records', sourceSystem: 'Test', targetSystem: 'Salesforce' }]"/>
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="get:\records:sf-http-sys-api-template-spec-config" name="get:\records:sf-http-sys-api-template-spec-config" doc:id="22220002-bbbb-4444-cccc-dd0000000002"/>
+		</munit:execution>
+		<munit:validation>
+			<munit-tools:assert-that doc:name="Assert HTTP status 404" expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(404)]"/>
+			<munit-tools:assert-that doc:name="Assert error code 404" expression="#[payload.error.code]" is="#[MunitTools::equalTo(404)]"/>
+			<munit-tools:assert-that doc:name="Assert error reason" expression="#[payload.error.reason]" is="#[MunitTools::equalTo('Not Found')]"/>
+		</munit:validation>
+	</munit:test>
+
+</mule>

@@ -1,0 +1,5 @@
+{
+  "messageId": "dlq-msg-001",
+  "destination": "dev-replace-with-dlq-name",
+  "status": "PUBLISHED"
+}

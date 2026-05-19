@@ -1,0 +1,14 @@
+[
+    {
+        "Id": "a005e000000XxXXAAZ",
+        "Name": "Test Record",
+        "ExternalId__c": "EXT-001",
+        "Status__c": "New"
+    },
+    {
+        "Id": "a005e000000YyYYAAZ",
+        "Name": "Another Record",
+        "ExternalId__c": "EXT-002",
+        "Status__c": "Active"
+    }
+]

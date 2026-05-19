@@ -1,0 +1,26 @@
+---
+description: Triggers MUnit test generation when the user asks to generate, create, scaffold, or write MUnit tests
+globs: 
+alwaysApply: false
+---
+
+# MUnit Test Generation Intent
+
+When the user's request is about **generating**, **creating**, **scaffolding**, or **writing** MUnit tests, use this intent to guide the process.
+
+## Procedure
+
+1. **Read `gen-munit-implementation.mdc`** for comprehensive MUnit implementation guidelines and best practices
+2. **Read all `gen-munit-*.mdc` files** from the `agents/munit/rules/` directory for MUnit generation standards
+2b. **Check `project/input_develop/` for pre-fetched JIRA and Confluence context files:**
+   - **If `jira-*.md` and `confluence-design.md` are both present:** Read them to extract acceptance criteria (→ test case derivation), downstream system names (→ mock targets), and field examples (→ fixture JSON values). Do NOT re-fetch from JIRA or Confluence.
+   - **If either or both files are missing:** Proceed using the Mule flow files alone. Optionally inform the user that richer test generation is possible if context files are added to `project/input_develop/`.
+3. **Also read `review-munit-testing.mdc`** from `agents/review/rules/` to ensure generated tests meet review standards
+4. **Analyze the target flow files** to understand endpoints, connectors, and error handling
+5. **Generate MUnit test suites** following the standards in `gen-munit-implementation.mdc` and the other referenced files
+
+## Generation Scope
+- MUnit test suite XML files under `src/test/munit/`
+- Test input/output JSON fixtures under `src/test/resources/`
+- DataWeave assertion scripts if needed
+- Mocks for all external connectors (HTTP, MQ, Database, Salesforce, etc.)

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+		Scatter-gather Route A: secondary SAPI optional call.
+		Called from update-record-sub-flow only when the guard condition is true
+		(optionalItems is non-empty AND secondaryId is present).
+
+		When scaffolding a real proc API:
+		  - Rename this file and sub-flow to match your actual secondary operation
+		    (e.g., update-consent-preferences-sub-flow.xml)
+		  - Set vars.targetApiParams using the appropriate DWL for the secondary SAPI
+		    (e.g., v-secondary-operation-params.dwl)
+		  - Add logging, payload transformation, and error handling as needed
+	-->
+	<sub-flow name="secondary-operation-sub-flow" doc:name="secondary-operation-sub-flow">
+
+		<ee:transform doc:name="FV Set Target API Params for secondary operation">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-secondary-operation-params.dwl" variableName="targetApiParams" />
+			</ee:variables>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload doc:name="LOG BEFORE REQUEST - secondary operation"
+			config-ref="custom-logger-connector_config"
+			message="POST secondary-sapi secondary-operation"
+			tracepoint="BEFORE_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.targetApiParams.requestPayload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<flow-ref name="common-http-request-flow"
+			doc:name="common-http-request-flow (secondary-sapi POST /secondary/items)"
+			target="secondarySapiResponse" />
+
+		<module-logger:build-log-with-encrypted-payload doc:name="LOG AFTER REQUEST - secondary operation"
+			config-ref="custom-logger-connector_config"
+			message="Response from secondary-sapi secondary-operation"
+			tracepoint="AFTER_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.secondarySapiResponse default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+	</sub-flow>
+
+</mule>

@@ -1,0 +1,28 @@
+---
+description: Triggers Confluence-ready documentation generation when the user asks to document, write/generate docs, or produce Confluence/Word documentation for a Mule API project
+globs:
+alwaysApply: false
+---
+
+# Mule API Documentation Generation Intent
+
+When the user's request contains any of these intent keywords — **document**, **documentation**, **docs**, **Confluence**, **write up**, **generate docs**, **API documentation** — and references a Mule API project path or repo URL, treat it as a request to produce Confluence-ready HTML plus a Word fallback.
+
+## Procedure
+
+1. **Read `gen-docs-implementation.mdc`** from `agents/documentation/rules/` for the full procedure, content standards, diagram rules, and output format.
+2. **Read applicable `review-*.mdc` files** from `agents/review/rules/` to ground the documentation in current naming, logging, error-handling, and security standards:
+   - `review-mule-flow-naming.mdc`
+   - `review-logging-standards.mdc`
+   - `review-error-handling.mdc`
+   - `review-properties-config.mdc`
+   - `review-api-design-standards.mdc`
+3. **Ask the Section-0 questions** in `gen-docs-implementation.mdc` BEFORE writing any output (project path, output folder, audience tone, section selection, optional source docs, diagram width).
+4. **Run the read-only project analysis** described in Section 1 of `gen-docs-implementation.mdc`.
+5. **Generate** the documentation artifacts following the standards.
+
+## Generation Scope
+
+- **`{project-name}-confluence.html`** — single self-contained HTML file with base64 PNG diagrams, ready for Confluence Cloud "Import HTML" or copy/paste into a Storage-format page.
+- **`{project-name}.docx`** — Word fallback for users who prefer Confluence's "Import Word document" feature.
+- Both files saved into the user-chosen output folder (default: `<project-parent>/<project>-documentation/`).

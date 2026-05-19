@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	    PATTERN A — Subscribe Channel Event Sub-Flow
+	    Called by: sfl-subscribe-channel-event-listener-flow
+	    Connector: mule4-salesforce-pubsub-connector:1.2.0 (PubSub / gRPC)
+
+	    Object Store usage:
+	      - os:retrieve BEFORE publishing → reads current persisted replayId
+	      - os:store    AFTER  publishing → persists max(currentReplayId, incomingReplayId)
+
+	    Payload shape (top-level fields from PubSub gRPC connector):
+	      payload.replayId  — numeric replay identifier
+	      payload.eventId   — unique event identifier
+	      payload.data.*    — event-specific fields (replace p-mq-publish-payload.dwl)
+	-->
+	<sub-flow name="subscribe-channel-event-sub-flow" doc:name="subscribe-channel-event-sub-flow">
+
+		<!-- LOG FLOW_START: include replayId and eventId for correlation in monitoring -->
+		<module-logger:build-log-without-payload
+			doc:name="Log Start"
+			config-ref="custom-logger-connector_config"
+			message="Received Subscribe Channel event"
+			tracepoint="FLOW_START"
+			sourceSystem="#[Mule::p('sourceSystem')]"
+			targetSystem="#[Mule::p('targetSystem')]"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": payload.replayId default "No replayId received in payload",
+	"eventId": payload.eventId default "No eventId received in payload"
+}]' />
+
+		<!-- LOG received event body (encrypted — safe for all environments) -->
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="Log Received Event"
+			config-ref="custom-logger-connector_config"
+			message="Received Subscribe Channel event"
+			sourceSystem="#[Mule::p('sourceSystem')]"
+			targetSystem="#[Mule::p('targetSystem')]"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": payload.replayId default "No replayId received in payload",
+	"eventId": payload.eventId default "No eventId received in payload"
+}]' />
+
+		<!--
+		    Transform:
+		      payload        → p-mq-publish-payload.dwl  (replace with real business mapping)
+		      requestContext → v-request-context.dwl      (sourceSystem, targetSystem, replayId, eventId)
+		      mqProperties   → v-mq-properties.dwl        (MQ user-properties header map)
+		-->
+		<ee:transform doc:name="Transform Incoming Event">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-mq-publish-payload.dwl" />
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+				<ee:set-variable resource="dwls/v-mq-properties.dwl" variableName="mqProperties" />
+			</ee:variables>
+		</ee:transform>
+
+		<!-- Retrieve previously stored replayId → vars.currentReplayId (default = 0) -->
+		<os:retrieve
+			doc:name="Retrieve replayId from Object Store"
+			key="replayId"
+			objectStore="pub-sub-object-store_config"
+			target="currentReplayId">
+			<os:default-value><![CDATA[#[Mule::p('sfl.pubSub.os.keyDefaultValue') as Number]]]></os:default-value>
+		</os:retrieve>
+
+		<!-- Publish transformed event to primary MQ queue -->
+		<flow-ref doc:name="Publish to MQ" name="mq-publish-sub-flow" />
+
+		<!-- Persist max(currentReplayId, incomingReplayId) to enable correct resume on restart -->
+		<os:store
+			doc:name="Update replayId in Object Store"
+			key="replayId"
+			objectStore="pub-sub-object-store_config">
+			<os:value><![CDATA[#[output application/json
+---
+if((vars.currentReplayId as Number) < (vars.requestContext.replayId)) vars.requestContext.replayId
+else (vars.currentReplayId as Number)]]]></os:value>
+		</os:store>
+
+		<!-- LOG FLOW_END -->
+		<module-logger:build-log-without-payload
+			doc:name="Log Exit"
+			config-ref="custom-logger-connector_config"
+			message="Subscribe Channel event published to MQ and replayId updated in Object Store"
+			tracepoint="FLOW_END"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": vars.requestContext.replayId default "No replayId received in payload",
+	"eventId": vars.requestContext.eventId default "No eventId received in payload"
+}]'
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+
+	</sub-flow>
+
+</mule>

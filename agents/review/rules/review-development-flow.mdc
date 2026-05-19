@@ -1,0 +1,63 @@
+---
+description: Enforces the development flow and PR/code review gate checklist — always applies
+alwaysApply: true
+---
+
+# Development Flow & Code Review Gate
+
+This rule is the PR/code review checklist. When reviewing code changes or preparing a pull request, verify all items below.
+
+## Pre-PR Checklist (Developer)
+1. All artifacts and use cases from sprint planning have been reviewed
+2. RAML specification created/updated (if REST API)
+3. Implementation meets the RAML specification
+4. Code tested locally and working as expected
+5. Secure properties configured via secure vault (e.g., Azure Key Vault) for all environments; or if using AES encryption, encryption requested for QA/UAT/Prod
+6. MUnit tests included with **at least 70% code coverage**
+7. Code pushed to a feature or bugfix branch (not directly to develop)
+
+## Code Review Gate (Reviewer)
+The PR **must not be merged** without review and approval. Verify:
+
+### Naming & Structure
+- [ ] Project name follows `{name}-{layer}-api` pattern (no regional prefix — deprecated)
+- [ ] Flow files are lower-case-hyphenated
+- [ ] Flows suffixed with `-flow`, sub-flows with `-sub-flow`, main flow is `{api-spec}-main`
+- [ ] No default Studio names on processors or scopes
+- [ ] Global config elements are in the global config file only
+- [ ] DataWeave scripts are externalized to `src/main/resources/dwls/`
+- [ ] Properties files follow `config-{env}.properties` naming
+
+### Quality
+- [ ] MUnit tests cover at least 70% of code
+- [ ] At least one positive and one negative test per endpoint
+- [ ] All external calls are mocked in tests
+- [ ] `mvn clean test` passes
+- [ ] Postman collection updated for new/modified endpoints
+
+### Security
+- [ ] No clear-text secrets in any file
+- [ ] Sensitive properties fetched from secure vault (e.g., Azure Key Vault) — or, if AES-encrypted, declared in `mule-artifact.json` `secureProperties`
+- [ ] Encryption keys not in source-controlled files
+
+### Documentation
+- [ ] `README.md` updated with: project description, business functionality, technical guidelines, release notes
+- [ ] Anypoint Exchange home page updated (if published)
+
+### Deployment
+- [ ] Version follows semantic versioning (major.minor.patch)
+- [ ] Deployment name within 42-character limit
+- [ ] Application configured for correct CloudHub private space
+
+### Logging (Insulet Custom Logger Connector)
+- [ ] All loggers use `module-logger` — no built-in Mule `logger` component
+- [ ] No `category` is mismatched with its operation (Major). Absent `category` is acceptable — connector auto-sets the correct default (Minor: recommend explicit)
+- [ ] INFO-level logs use only "Without Payload" operations (category `com.insulet.general`)
+- [ ] DEBUG-level logs use only masked or encrypted operations — never raw payload
+- [ ] No `tracepoint` is incorrect for its context (Major). Absent `tracepoint` defaults to `FLOW_START` — flag only when context requires a different value (e.g., error handlers need explicit `EXCEPTION`, exit loggers need explicit `FLOW_END`)
+- [ ] `sourceSystem` and `targetSystem` set on every logger
+- [ ] Error handlers have both INFO (context) and DEBUG (protected payload) entries
+- [ ] `log4j2.xml` declares all three `AsyncLogger` categories with correct levels per environment
+- [ ] PROD `log4j2.xml` has all categories at WARN (no leftover DEBUG)
+- [ ] `sensitiveKeyParts` configured in global connector config
+- [ ] `encryptionKey` sourced from secure vault, not hardcoded

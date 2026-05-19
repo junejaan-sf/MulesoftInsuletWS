@@ -1,0 +1,49 @@
+#%RAML 1.0 ResourceType
+
+get?:
+  description: <<getDescription>>
+  responses:
+    200:
+      body:
+        application/json:
+          example: <<getResponseExample>>
+          type: <<getResponseType>>
+
+post?:
+  description: <postDescription>>
+  body:
+    application/json:
+      type: <<postBodyType>>
+      example: <<postBodyExample>>
+  responses:
+    201:
+      body:
+        application/json:
+          example: <<postResponseExample>>
+          type: <<postResponseType>>
+
+put?:
+  description: <putDescription>>
+  body:
+    application/json:
+      type: <<putBodyType>>
+      example: <<putBodyExample>>
+  responses:
+    201:
+      body:
+        application/json:
+          example: <<putResponseExample>>
+          type: <<putResponseType>>   
+
+patch?:
+  description: <patchDescription>>
+  body:
+    application/json:
+      type: <<patchBodyType>>
+      example: <<patchBodyExample>>
+  responses:
+    201:
+      body:
+        application/json:
+          example: <<patchResponseExample>> 
+          type: <<patchResponseType>>

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:module-error-handler-plugin="http://www.mulesoft.org/schema/mule/module-error-handler-plugin"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/module-error-handler-plugin http://www.mulesoft.org/schema/mule/module-error-handler-plugin/current/mule-module-error-handler-plugin.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+		Global error handler: single on-error-continue branch.
+		1. process-error maps the error type to HTTP status + reason via customErrors.dwl
+		2. Async block fires async-error-flow-sub-flow (POST /transactions-errors to sfl-crm-persona-sys-api)
+		3. Logs error without payload (safe for PROD)
+		4. Logs error with encrypted original payload (DEBUG level, encrypted at PROD)
+	-->
+	<error-handler name="global-error-handler">
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+			<module-error-handler-plugin:process-error error="#[vars.errorDetails default error]">
+				<module-error-handler-plugin:custom-errors><![CDATA[#[${file::errors/customErrors.dwl}]]]></module-error-handler-plugin:custom-errors>
+				<module-error-handler-plugin:previous-error><![CDATA[#[vars.errorDetails.errorMessage.payload match {
+    case is Object -> vars.errorDetails.errorMessage.payload.error.message default vars.errorDetails.errorMessage.payload.error_description default ""
+    case is String -> vars.errorDetails.errorMessage.payload
+    else -> ""
+} default ""]]]></module-error-handler-plugin:previous-error>
+			</module-error-handler-plugin:process-error>
+			<set-variable variableName="httpStatus" value="#[attributes.httpStatus]" doc:name="Set HTTP Status Code" />
+			<ee:transform doc:name="Set Var ErrorMessage">
+				<ee:message />
+				<ee:variables>
+					<ee:set-variable variableName="errorMessage"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.errorLog default ""]]></ee:set-variable>
+				</ee:variables>
+			</ee:transform>
+			<!-- Async: log error to sfl-crm-persona-sys-api POST /transactions-errors -->
+			<async doc:name="Async Transaction Error">
+				<flow-ref name="async-error-flow-sub-flow" doc:name="Invoke Async Error Flow" />
+			</async>
+			<module-logger:build-error-log-without-payload doc:name="LOG ERROR without payload"
+				config-ref="custom-logger-connector_config"
+				message='#[output application/json --- (attributes.httpStatus default "500") ++ " " ++ (payload.error.reason default "Internal Server Error")]'
+				tracepoint="EXCEPTION"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				errorType='#[output application/json --- vars.errorDetails.errorType.identifier default error.errorType.identifier default "UNKNOWN"]'
+				errorDescription='#[output application/json ---
+vars.errorDetails.message default payload.error.message default error.description default "Unhandled error"]'
+				cause='#[output application/json --- vars.errorDetails.cause.message default error.cause.message default ""]'
+				errorCode='#[vars.httpStatus default "500"]' />
+			<module-logger:build-error-log-with-encrypted-payload doc:name="LOG ERROR with encrypted payload"
+				config-ref="custom-logger-connector_config"
+				message='#[output application/json --- ((attributes.httpStatus default "500") ++ " " ++ (payload.error.reason default "There is a server issue"))]'
+				tracepoint="EXCEPTION"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				errorType='#[output application/json --- vars.errorDetails.errorType.identifier default error.errorType.identifier default "UNKNOWN"]'
+				errorDescription='#[output application/json ---
+vars.errorDetails.message default payload.error.message default error.description default "Unhandled error"]'
+				cause='#[output application/json --- vars.errorDetails.cause.message default error.cause.message default ""]'
+				errorCode="#[attributes.httpStatus default 500]">
+				<module-logger:body><![CDATA[#[output application/json --- vars.requestContext.originalPayload default {}]]]></module-logger:body>
+			</module-logger:build-error-log-with-encrypted-payload>
+		</on-error-continue>
+	</error-handler>
+
+	<!--
+		Connectivity error handler: raises APP:CONNECTIVITY_FAILED if success == false.
+		Called at the end of common-http-request-flow after until-successful exhausts retries.
+	-->
+	<sub-flow name="connectivity-error-handler-sub-flow" doc:name="Connectivity Error Handler">
+		<choice doc:name="Check Success == false">
+			<when expression="#[!(vars.success default false)]">
+				<raise-error type="APP:CONNECTIVITY_FAILED"
+					description='#[vars.errorDetails.errorMessage.payload.error.message default vars.errorDetails.description default error.detailedDescription default ""]'
+					doc:name="Raise APP:CONNECTIVITY_FAILED" />
+			</when>
+		</choice>
+	</sub-flow>
+
+</mule>

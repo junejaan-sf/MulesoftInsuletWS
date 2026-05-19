@@ -1,0 +1,54 @@
+---
+description: Enforces security and encryption standards for properties and config files during code reviews
+globs: "{**/src/main/resources/**,**/mule-artifact.json}"
+alwaysApply: false
+---
+
+# Security & Encryption Standards
+
+## No Clear-Text Secrets
+- **Zero tolerance** for clear-text passwords, API keys, or secrets in any file
+- Sensitive values must be fetched from a **secure vault** (Azure Key Vault, AWS Secrets Manager, etc.) or encrypted using **AES CBC** encryption
+- When a secure vault provider is used, AES encryption and `secureProperties` in `mule-artifact.json` are **not required** — the vault handles secret protection at runtime
+
+## Encryption Key Storage (when AES encryption is used instead of vault)
+- Encryption keys must **never** appear in properties files or source code
+- Acceptable locations: VM arguments in Studio Run Configuration (`-M-Dxxxx=123123`)
+- In production: secure vault (Azure Key Vault, AWS Secrets Manager, etc.)
+- Do not create shared run configurations that expose keys
+
+## Secure Properties Declaration
+- If sensitive properties are fetched via a secure vault provider (e.g., `${azure-key-vault-properties-provider::secret::...}`), declaring them in `mule-artifact.json` `secureProperties` is **not required**
+- If sensitive properties use AES-encrypted values instead of a vault, they **must** be declared as secured properties in `mule-artifact.json`
+- Examples of properties that must be protected (via vault or encryption): client IDs, client secrets, passwords, encryption keys, certificate passwords
+
+## Client ID Enforcement
+- Apply Client ID enforcement policy (preferably as Automated Policy)
+- Use HTTP Basic Authentication Header option for flexibility
+- Each API calling another API should have its own client application defined
+- Non-production environments may use a shared client application for convenience
+
+## Secure Vault Integration
+- Use Azure Key Vault (or equivalent) for managing secrets at runtime
+- Reference secrets via secure property providers, not inline values
+- Secrets in the vault follow the project naming convention (e.g., `sfl-consumer-key`, `mule-mq-app-client-id`)
+
+## Logging & Data Protection
+- All logging **must** use the Insulet Custom Logger Connector (`module-logger`), never the built-in Mule `logger`
+- **Never log raw payloads** — use masked (`build-log-with-masked-payload`) or encrypted (`build-log-with-encrypted-payload`) operations only
+- `sensitiveKeyParts` must be configured in the custom logger global config to mask PII fields (e.g., `ssn,password,secret,token,email`)
+- `safeKeys` must be configured for false-positive exclusions (e.g., `passwordPolicy`)
+- The logger `encryptionKey` must be sourced from secure vault — never hardcoded
+- `entityDetails` must contain **only** non-sensitive business identifiers (e.g., `orderId`)
+- PROD: When a single `log4j2.xml` is used, consider filtering/deployment config to set `com.insulet.*` categories to `WARN`; `DEBUG` only during active triage and **must be reverted**
+
+## Review Checklist
+- [ ] No plain-text passwords, keys, or secrets in any file
+- [ ] Sensitive properties fetched from secure vault (e.g., Azure Key Vault) — or, if AES-encrypted, declared in `mule-artifact.json` `secureProperties`
+- [ ] Encryption keys not stored in source-controlled files
+- [ ] Secure vault integration configured for all environments
+- [ ] Client ID enforcement configured for API-to-API calls
+- [ ] No raw payload logging — only masked or encrypted operations used
+- [ ] `sensitiveKeyParts` configured with all PII/credential field fragments
+- [ ] Logger `encryptionKey` sourced from secure vault, not hardcoded
+- [ ] When PROD requires it, `com.insulet.*` categories are at WARN or ERROR

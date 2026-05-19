@@ -1,0 +1,56 @@
+---
+description: Enforces centralized error handling patterns for Mule flows during code reviews
+globs: **/src/main/mule/**/*.xml
+alwaysApply: false
+---
+
+# Error Handling Standards
+
+## Centralized Global Error Handler
+- A global error handler **must** be defined in a dedicated file (e.g., `global-error-handler.xml`)
+- The global error handler is referenced from the main API flow using `defaultErrorHandler-ref`
+- Do not duplicate error handling logic across multiple flow files
+
+## Error Handler Pattern
+- Use `on-error-continue` in the global handler to return structured error responses
+- Use `on-error-propagate` in sub-flows to bubble errors up to the global handler
+- Each error handler must:
+  1. Set an appropriate `httpStatus` variable
+  2. Log the error with full details at ERROR level
+  3. Return a structured error response payload
+
+## Custom Error Mapping
+- Define custom error type mappings in a DataWeave file (e.g., `errors/customErrors.dwl`)
+- Map Mule error types to HTTP status codes:
+  - `HTTP:BAD_REQUEST` → 400
+  - `HTTP:UNAUTHORIZED` → 401
+  - `HTTP:NOT_FOUND` → 404
+  - `APP:CONNECTIVITY_FAILED` → 503
+  - `HTTP:INTERNAL_SERVER_ERROR` → 500
+  - `MULE:UNKNOWN` → derive status from error details
+
+## Connectivity Error Handling
+- External HTTP calls should use `until-successful` for retries where appropriate
+- Connectivity failures should raise custom `APP:CONNECTIVITY_FAILED` errors
+- Set `success` and `errorDetails` variables for downstream decision-making
+
+## Async/Event Error Handling
+- Event-driven flows (e.g., platform event listeners) must use `on-error-continue` to prevent message loss
+- Failed messages must be published to a Dead Letter Queue (DLQ)
+- Notifications must be sent on DLQ publish failures
+
+## Error Handler Logging (Insulet Custom Logger)
+- Error handlers must include **two** `module-logger` entries:
+  1. **INFO/ERROR** entry using `build-error-log-without-payload` with category `com.insulet.general` — captures `errorType`, `errorDescription`, `cause`, `errorCode` without payload
+  2. **DEBUG** entry using `build-error-log-with-masked-payload` or `build-error-log-with-encrypted-payload` — captures the protected payload for triage
+- **`tracepoint="EXCEPTION"` is required (Major)** on all error handler log entries — the connector defaults to `FLOW_START` which is incorrect in error context, so this must be set explicitly
+- Both entries must include `sourceSystem` and `targetSystem`
+
+## Review Checklist
+- [ ] Global error handler exists and is referenced from the main flow
+- [ ] No scattered try-catch blocks duplicating error handling logic
+- [ ] Custom error mappings defined in external DWL file
+- [ ] Error handlers have both INFO (context) and DEBUG (protected payload) log entries
+- [ ] Error log entries use `module-logger` with explicit `tracepoint="EXCEPTION"` (Major — connector default `FLOW_START` is wrong in error context)
+- [ ] Structured error response returned with correct HTTP status
+- [ ] Async flows have DLQ fallback and notification on failure

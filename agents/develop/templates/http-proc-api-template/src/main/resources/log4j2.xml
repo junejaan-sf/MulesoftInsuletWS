@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration status="INFO" name="cloudhub"
+    packages="com.insulet.datadog,org.apache.logging.log4j">
+    <Appenders>
+        <RollingFile name="file" fileName="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}${project.artifactId}.log"
+                     filePattern="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}${project.artifactId}-%i.log">
+            <PatternLayout pattern="%-5p %d [%t] [processor: %X{processorPath}; event: %X{correlationId}] %c: %m%n"/>
+            <SizeBasedTriggeringPolicy size="10 MB"/>
+            <DefaultRolloverStrategy max="10"/>
+        </RollingFile>
+        <DataDogLog4jAppender name="DATADOG"
+              endpoint="${sys:DATADOG_HOST}"
+              apiKey="${sys:DATADOG_API_KEY}"
+              source="MuleSoft"
+              host="${hostName}"
+              service="${project.artifactId}"
+              apiLayer="${sys:anypoint.platform.visualizer.layer}"
+              environment="${sys:mule.env}"
+              ddTags="integration:MuleSoft-To-DataDog"
+              batchSize="500"
+              maxBytesPerBatch="5242880"
+              flushIntervalMs="5000"
+              connectTimeoutMs="2000"
+              readTimeoutMs="10000"
+              retryEnabled="true"
+              retryCount="3"
+              enableCircuitBreaker="true"
+              circuitBreakerFailures="5"
+              circuitBreakerOpenMs="30000"
+              compressPayloads="true">
+            <PatternLayout pattern="%-5p %d [%t] [processor: %X{processorPath}; event: %X{correlationId}] %c: %m%n" />
+        </DataDogLog4jAppender>
+    </Appenders>
+    <Loggers>
+        <AsyncLogger name="org.mule.service.http" level="WARN"/>
+        <AsyncLogger name="org.mule.extension.http" level="WARN"/>
+        <AsyncLogger name="org.mule.runtime.core.internal.processor.LoggerMessageProcessor" level="INFO"/>
+        <AsyncLogger name="com.insulet.general" level="INFO" />
+        <AsyncLogger name="com.insulet.maskedpayload" level="INFO" />
+        <!-- Set to WARN in PROD log4j2.xml -->
+        <AsyncLogger name="com.insulet.encryptedpayload" level="DEBUG" />
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="file"/>
+            <AppenderRef ref="DATADOG"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>

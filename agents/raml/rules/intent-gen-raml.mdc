@@ -1,0 +1,25 @@
+---
+description: Triggers RAML API specification generation when the user asks to generate, create, scaffold, or write RAML specs
+globs: 
+alwaysApply: false
+---
+
+# RAML Specification Generation Intent
+
+When the user's request is about **generating**, **creating**, **scaffolding**, or **writing** RAML API specifications, use this intent to guide the process.
+
+## Procedure
+
+1. **Read `gen-raml-implementation.mdc`** for comprehensive RAML implementation guidelines and best practices
+2. **Read all `gen-raml-*.mdc` files** from the `agents/raml/rules/` directory for RAML generation standards
+3. **Also read `review-api-design-standards.mdc`** from `agents/review/rules/` to ensure generated specs meet review standards
+3. **Understand the API requirements** from the user's description or existing implementation
+4. **Generate RAML artifacts** following the standards
+
+## Generation Scope
+- **Output location**: `agents/raml/examples/{api-spec-name}/` (sibling of existing example specs, not inside them)
+- Root RAML file (e.g., `{name}-{layer}-api-spec.raml`)
+- Data type definitions under `dataTypes/`
+- Example payloads under `examples/`
+- Traits under `traits/`
+- Libraries and type references

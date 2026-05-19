@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	     CREATE RECORD SUB-FLOW — POST /records
+
+	     Pattern  (mirrors create-leads.xml + common-create-leads.xml from sfl-crm-persona-sys-api):
+	       1. Set vars.osKey for RecordType ObjectStore lookup
+	       2. common-retrieve-record-type-sub-flow → target vars.recordCreationRecordTypeId
+	       3. Transform request body → SF sObject array   (p-create-record-request.dwl)
+	       4. Set vars.targetApiParams.sfObject            (v-set-target-api-params-sf-object.dwl)
+	       5. LOG BEFORE REQUEST — encrypted, BEFORE_SALESFORCE
+	       6. execute-sf-create-flow                       → target vars.recordResponse
+	       7. LOG AFTER REQUEST  — encrypted, AFTER_SALESFORCE
+	       8. Choice on vars.recordResponse.items[0].payload.success
+	            when true  → set final payload             (p-create-record-response.dwl)
+	            otherwise  → set-variable recordStatus=false, raise APP:RECORD_CREATION_FAILED
+
+	     NOTE: Remove steps 1-2 if the target sObject does not use RecordTypes.
+	-->
+	<sub-flow name="create-record-sub-flow" doc:id="11111111-aaaa-4444-bbbb-cc0000000001">
+
+		<set-variable
+			value="#[Mule::p('os.recordTypeId.SObjectName')]"
+			doc:name="Set SObject OS Key"
+			doc:id="22222222-aaaa-4444-bbbb-cc0000000002"
+			variableName="osKey" />
+
+		<flow-ref
+			doc:name="common-retrieve-record-type-sub-flow"
+			doc:id="33333333-aaaa-4444-bbbb-cc0000000003"
+			name="common-retrieve-record-type-sub-flow"
+			target="recordCreationRecordTypeId" />
+
+		<ee:transform doc:name="DW Transform Create Record Request" doc:id="44444444-aaaa-4444-bbbb-cc0000000004">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-create-record-request.dwl" />
+			</ee:message>
+		</ee:transform>
+
+		<ee:transform doc:name="FV Set Target API Params" doc:id="55555555-aaaa-4444-bbbb-cc0000000005">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-set-target-api-params-sf-object.dwl" variableName="targetApiParams" />
+			</ee:variables>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG BEFORE REQUEST"
+			doc:id="66666666-aaaa-4444-bbbb-cc0000000006"
+			config-ref="custom-logger-connector_config"
+			message="Executing SFDC create request for record"
+			tracepoint="BEFORE_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- payload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<flow-ref
+			doc:name="execute-sf-create-flow"
+			doc:id="77777777-aaaa-4444-bbbb-cc0000000007"
+			name="execute-sf-create-flow"
+			target="recordResponse" />
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG AFTER REQUEST"
+			doc:id="88888888-aaaa-4444-bbbb-cc0000000008"
+			config-ref="custom-logger-connector_config"
+			message="Response from SFDC create request for record"
+			tracepoint="AFTER_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.recordResponse default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<choice doc:name="Check if Record Created" doc:id="99999999-aaaa-4444-bbbb-cc0000000009">
+			<when expression="#[(vars.recordResponse.items[0].payload.success as Boolean) default false]">
+				<ee:transform doc:name="DW Set Create Record Response" doc:id="aaaaaaaa-aaaa-4444-bbbb-cc0000000010">
+					<ee:message>
+						<ee:set-payload resource="dwls/p-create-record-response.dwl" />
+					</ee:message>
+				</ee:transform>
+			</when>
+			<otherwise>
+				<set-variable
+					value="#[false]"
+					doc:name="Set recordStatus = false"
+					doc:id="bbbbbbbb-aaaa-4444-bbbb-cc0000000011"
+					variableName="recordStatus" />
+				<raise-error
+					doc:name="RAISE APP:RECORD_CREATION_FAILED"
+					doc:id="cccccccc-aaaa-4444-bbbb-cc0000000012"
+					type="APP:RECORD_CREATION_FAILED"
+					description='#[output application/json --- (vars.recordResponse.items[0].payload.errors[0].message default "SF create returned success=false")]' />
+			</otherwise>
+		</choice>
+
+	</sub-flow>
+
+</mule>

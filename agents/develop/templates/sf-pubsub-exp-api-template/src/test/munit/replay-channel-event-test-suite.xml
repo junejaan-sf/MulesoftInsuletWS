@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+	xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+	<munit:config name="replay-channel-event-test-suite" minMuleVersion="4.9.0" />
+
+	<!--
+	===================================================================
+	TEST 1: SUCCESS — Replay Channel Event (Pattern B, Streaming CometD)
+	Scenario: Valid streaming event received, transformed, published to MQ.
+	          No Object Store interaction required.
+	===================================================================
+	-->
+	<munit:test name="replay-channel-event-success-test"
+		doc:name="replay-channel-event-success-test"
+		description="Pattern B: Valid streaming event is transformed and published to MQ">
+
+		<munit:behavior>
+			<!-- Mock anypoint-mq:publish — return success -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[readUrl('classpath://testdata/mq-publish-success.json', 'application/json')]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock all logger calls -->
+			<munit-tools:mock-when processor="module-logger:build-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload
+				value="#[readUrl('classpath://testdata/replay-channel-event-input.json', 'application/json')]"
+				doc:name="Set Streaming Event Payload" />
+			<flow-ref name="replay-channel-event-sub-flow" doc:name="Execute replay-channel-event-sub-flow" />
+		</munit:execution>
+
+		<munit:validation>
+			<!-- Verify MQ publish was called exactly once -->
+			<munit-tools:verify-call processor="anypoint-mq:publish" times="1">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+			<!-- Verify NO Object Store interaction (Pattern B characteristic) -->
+			<munit-tools:verify-call processor="os:retrieve" times="0" />
+			<munit-tools:verify-call processor="os:store" times="0" />
+		</munit:validation>
+	</munit:test>
+
+	<!--
+	===================================================================
+	TEST 2: MQ PUBLISH ERROR — Anypoint MQ publish fails (Pattern B)
+	Scenario: MQ publish throws ANYPOINT-MQ:PUBLISHING.
+	          Global error handler catches; flow continues.
+	===================================================================
+	-->
+	<munit:test name="replay-channel-event-mq-error-test"
+		doc:name="replay-channel-event-mq-error-test"
+		description="Pattern B: MQ publish failure is caught by global error handler"
+		expectedErrorType="ANYPOINT-MQ:PUBLISHING">
+
+		<munit:behavior>
+			<!-- Mock anypoint-mq:publish to throw an error -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="ANYPOINT-MQ:PUBLISHING" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock all logger calls -->
+			<munit-tools:mock-when processor="module-logger:build-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-error-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-error-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload
+				value="#[readUrl('classpath://testdata/replay-channel-event-input.json', 'application/json')]"
+				doc:name="Set Streaming Event Payload" />
+			<flow-ref name="replay-channel-event-sub-flow" doc:name="Execute replay-channel-event-sub-flow" />
+		</munit:execution>
+	</munit:test>
+
+</mule>

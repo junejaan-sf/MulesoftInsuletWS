@@ -1,0 +1,56 @@
+---
+description: Enforces RAML API specification design standards during code reviews
+globs: **/*.raml
+alwaysApply: false
+---
+
+# API & RAML Design Standards
+
+## API-Led Connectivity
+- Follow the three-tier API-led architecture:
+  - **Experience APIs** (`exp`): consumer-facing, orchestration
+  - **Process APIs** (`proc`): business logic, composition
+  - **System APIs** (`sys`): backend system integration
+- Each API should serve a single tier — do not mix layers
+
+## RAML Project Naming
+- **No regional prefix** — Do NOT add regional prefixes (e.g., `na-`, `eu-`, `apac-`) per leadership directive
+- Pattern: `{name}-{layer}-api-spec`
+  - **{name}**: Logical application name (e.g., `sfl-leads`, `drupal`, `benefits-investigation`)
+  - **{layer}**: API layer — `sys` (system), `proc` (process), or `exp` (experience)
+- Lower case, hyphen-separated
+- Root RAML file name must match the project name (e.g., `sfl-leads-sys-api-spec.raml`)
+
+## RAML File & Folder Conventions
+- Folder names: **camelCase** (e.g., `dataTypes`, `enumTypes`, `traits`, `examples`)
+- All non-root files: **TitleCase** (e.g., `OrdersDataType.raml`, `ErrorResponsesTrait.raml`)
+- **Examples folder** (`examples/*.raml`): Use TitleCase for example files (e.g., `LeadRequestExample.raml`, `LeadResponseExample.raml`). Do not use lowercase-hyphenated names (e.g., `lead-request-example.raml`).
+- Library imports: use **TitleCase** names (e.g., `ProduceTypes`, `GlobalResponses`)
+
+## RESTful Resource Design
+- Top-level resources represent business domain nouns (e.g., `/employees`, `/orders`)
+- Collections use **plural** names (e.g., `/accounts`)
+- Singular resources use **singular** names (e.g., `/account/{id}`)
+- Verbs as sub-resources are only acceptable in Experience/Process APIs for triggering processes
+
+## API URL Pattern
+- Base path: `/{project-name}/api/{version}/`
+- Example: `/sfl-leads-sys-api/api/v1/`
+- Version in URL matches the major semantic version (`v1`, `v2`, etc.)
+- Use a fixed `baseUri` when a single host applies; avoid redundant `baseUriParameters` with only one default value
+
+## Anypoint Exchange
+- When published to Exchange, update the asset title to user-friendly Title Case
+- Example: `sfl-leads-sys-api-spec` → "SFL Leads System API"
+
+## RAML Resource Type Placement
+- Apply `type` (resource type) to **resources** only — not to methods. RAML 1.0 does not support `type` on operation nodes.
+
+## Review Checklist
+- [ ] RAML project follows `{name}-{layer}-api-spec` naming (no regional prefix)
+- [ ] Resource types applied at resource level (not under get/post)
+- [ ] Folder names are camelCase, non-root files are TitleCase
+- [ ] Example files in `examples/` use TitleCase (e.g., `LeadRequestExample.raml`)
+- [ ] Resources are nouns representing domain entities
+- [ ] Collections use plural naming
+- [ ] API URL follows `/{project}/api/{version}/` pattern

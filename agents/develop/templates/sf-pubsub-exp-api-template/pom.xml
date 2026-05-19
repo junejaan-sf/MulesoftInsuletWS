@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>260ebaee-d8f1-4739-bb12-b8db2f1568ca</groupId>
+		<artifactId>mule-common-pom</artifactId>
+		<version>1.0.9</version>
+	</parent>
+
+	<groupId>e0bc8c96-9dbd-48bc-915e-3e29577af6b3</groupId>
+	<artifactId>sf-pubsub-exp-api-template</artifactId>
+	<version>1.0.0-SNAPSHOT</version>
+	<packaging>mule-application</packaging>
+	<name>sf-pubsub-exp-api-template</name>
+	<description>Template project for receiving Salesforce platform events (via Subscribe Channel Listener or Replay Channel Listener) and publishing to Anypoint MQ</description>
+
+	<properties>
+		<!-- API Details -->
+		<api.raml.version>1.0.0</api.raml.version>
+		<!-- Application Details -->
+		<app.name>${project.name}</app.name>
+		<app.version>v1</app.version>
+		<tags>exp</tags>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+	</properties>
+
+	<build>
+		<resources>
+			<resource>
+				<directory>src/main/resources</directory>
+				<filtering>true</filtering>
+			</resource>
+		</resources>
+		<testResources>
+			<testResource>
+				<directory>src/test/resources</directory>
+				<filtering>true</filtering>
+			</testResource>
+		</testResources>
+		<plugins>
+			<plugin>
+				<groupId>org.mule.tools.maven</groupId>
+				<artifactId>mule-maven-plugin</artifactId>
+				<extensions>true</extensions>
+				<configuration>
+					<classifier>mule-application</classifier>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-resources-plugin</artifactId>
+			</plugin>
+		</plugins>
+	</build>
+
+	<dependencies>
+		<!-- RAML Spec from Anypoint Exchange -->
+		<dependency>
+			<groupId>${project.groupId}</groupId>
+			<artifactId>sf-pubsub-exp-api-template-spec</artifactId>
+			<version>${api.raml.version}</version>
+			<classifier>raml</classifier>
+			<type>zip</type>
+		</dependency>
+
+		<!-- Datadog Log Appender -->
+		<dependency>
+			<groupId>${project.parent.groupId}</groupId>
+			<artifactId>log4j-datadog-appender</artifactId>
+			<version>1.0.1</version>
+		</dependency>
+
+		<!--
+		    PATTERN A: Salesforce PubSub Connector (gRPC / Subscribe Channel Listener)
+		    Explicit version required — not managed by parent BOM at time of authoring.
+		-->
+		<dependency>
+			<groupId>com.mulesoft.connectors</groupId>
+			<artifactId>mule4-salesforce-pubsub-connector</artifactId>
+			<version>1.2.0</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+
+		<!--
+		    PATTERN B: Salesforce Connector (Streaming / Replay Channel Listener)
+		    Version managed by parent BOM.
+		-->
+		<dependency>
+			<groupId>com.mulesoft.connectors</groupId>
+			<artifactId>mule-salesforce-connector</artifactId>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+
+		<!-- Anypoint MQ — publish to primary queue and DLQ -->
+		<dependency>
+			<groupId>com.mulesoft.connectors</groupId>
+			<artifactId>anypoint-mq-connector</artifactId>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+
+		<!-- Object Store — replayId persistence for Pattern A -->
+		<dependency>
+			<groupId>org.mule.connectors</groupId>
+			<artifactId>mule-objectstore-connector</artifactId>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+
+		<!-- Tracing Module — tracing:with-correlation-id in Pattern A listener -->
+		<dependency>
+			<groupId>org.mule.modules</groupId>
+			<artifactId>mule-tracing-module</artifactId>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+
+		<!-- Test assertions -->
+		<dependency>
+			<groupId>org.mule.weave</groupId>
+			<artifactId>assertions</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+</project>

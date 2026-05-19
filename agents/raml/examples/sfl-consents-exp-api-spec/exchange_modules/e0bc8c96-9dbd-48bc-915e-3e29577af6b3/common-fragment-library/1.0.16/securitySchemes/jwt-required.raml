@@ -1,0 +1,21 @@
+#%RAML 1.0 SecurityScheme
+type: x-jwt-bearer
+description: JWT Bearer token authentication. Token obtained from POST /token endpoint.
+describedBy:
+  headers:
+    Authorization:
+      description: |
+        Used to send a valid OAuth 2 access token. 
+        Format: "Bearer <JWT_TOKEN>"
+      type: string
+      pattern: ^Bearer .+
+      example: Bearer eyJraWQikpYTmhISXNzTnR
+  responses:
+    401:
+      description: |
+        Unauthorized. The provided JWT is either invalid, expired, or the 
+        Authorization header is missing.
+    403:
+      description: |
+        Forbidden. The JWT is valid but does not have the necessary 
+        permissions (scopes) for this resource.

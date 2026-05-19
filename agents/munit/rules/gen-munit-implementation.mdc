@@ -1,0 +1,1122 @@
+---
+description: Comprehensive MUnit test implementation guidelines for MuleSoft 4.x APIs
+globs: ["**/*-test-suite.xml", "**/munit/**/*.xml", "**/testdata/**/*.json", "**/testdata/**/*.xml"]
+alwaysApply: false
+---
+# MUnit Test Implementation Guidelines for MuleSoft 4.x
+
+## Overview
+This guide provides comprehensive rules and best practices for implementing MUnit tests in MuleSoft 4.x system APIs. Follow these guidelines to create consistent, maintainable, and effective test suites applicable to any backend system (REST, SOAP, Database, Salesforce, SAP, etc.).
+
+## Code Coverage Requirements
+
+### Target Coverage
+- **Minimum Target**: 85-90% code coverage
+- Design tests with coverage in mind from the start
+- Include tests for APIKit router flows to boost coverage
+
+### Coverage Strategy
+
+**1. Test APIKit Router Flows**
+APIKit router flows handle HTTP routing and significantly impact coverage. Always include tests that:
+- Hit the main API entry point (e.g., `na-sfl-sys-api-main` flow)
+- Test through the APIKit router to exercise routing logic
+- Cover different HTTP methods and endpoints
+
+```xml
+<!-- Test through the main APIKit router flow for better coverage -->
+<flow-ref doc:name="Flow-ref to api-main" name="na-sfl-sys-api-main"/>
+```
+
+**2. Ignored Files (from parent POM: mule-common-pom)**
+The following files are excluded from coverage calculation:
+```xml
+<ignoreFiles>
+    <ignoreFile>common/global-error-handler.xml</ignoreFile>
+    <ignoreFile>common/global-config.xml</ignoreFile>
+    <ignoreFile>com/insulet/mulesoft/Notification/module-notification.xml</ignoreFile>
+    <ignoreFile>com/insulet/mulesoft/Logger/module-logger.xml</ignoreFile>
+</ignoreFiles>
+```
+
+**Note**: These configurations come from the parent POM (`mule-common-pom`). Do NOT mock logger components as they are ignored from coverage.
+
+**3. Focus Areas for Coverage**
+- All implementation flows (`src/main/mule/implementation/*.xml`)
+- API specification flows (`src/main/mule/*-spec.xml`)
+- Common connectivity flows (`src/main/mule/common/common-connectivity.xml`)
+
+**4. Testing Flows with Message Sources (MQ, HTTP, Scheduler, etc.)**
+
+Flows that start with a message source (e.g., `anypoint-mq:subscriber`, `http:listener`, `scheduler`) require special handling in MUnit. **ALWAYS call the main flow directly** using `flow-ref` - MUnit will skip the message source and execute the flow logic.
+
+**IMPORTANT**: Do NOT manually call individual sub-flows or replicate flow logic in your test. This:
+- Reduces code coverage (the main flow's transforms and components are not tested)
+- Creates maintenance burden (tests break when flow structure changes)
+- Misses integration issues between flow components
+
+✅ **CORRECT** - Call the main flow directly:
+```xml
+<munit:execution>
+    <!-- Set payload and attributes that simulate the message source -->
+    <munit:set-event doc:name="Set MQ Event Payload">
+        <munit:payload value="#[output application/json --- readUrl('classpath://testdata/.../request.json')]"/>
+        <munit:attributes value="#[{
+            properties: {
+                correlationId: '12345-abcde-67890',
+                SourceSystem: 'Salesforce'
+            },
+            messageId: 'msg-12345'
+        }]"/>
+    </munit:set-event>
+    
+    <!-- Call the MAIN flow - MUnit skips the message source and executes flow logic -->
+    <flow-ref doc:name="Flow-ref to mq-consumer" name="my-mq-consumer-flow"/>
+</munit:execution>
+```
+
+❌ **INCORRECT** - Do NOT manually call sub-flows or replicate flow logic:
+```xml
+<munit:execution>
+    <!-- BAD: Manually replicating flow transforms -->
+    <ee:transform doc:name="Request to System API">
+        <ee:message>
+            <ee:set-payload resource="dwls/some-transform.dwl"/>
+        </ee:message>
+    </ee:transform>
+    
+    <!-- BAD: Calling individual sub-flows instead of main flow -->
+    <flow-ref doc:name="Call sub-flow-1" name="sub-flow-1"/>
+    <flow-ref doc:name="Call sub-flow-2" name="sub-flow-2"/>
+</munit:execution>
+```
+
+**Message Source Attribute Structures**:
+
+| Message Source | Required Attributes |
+|----------------|---------------------|
+| `anypoint-mq:subscriber` | `properties: {correlationId, SourceSystem, ...}, messageId, contentType` |
+| `http:listener` | `headers: {...}, queryParams: {...}, uriParams: {...}, requestPath, method` |
+| `scheduler` | No attributes needed - just set payload |
+| `file:listener` | `path, filename, size, timestamp` |
+
+### What NOT to Mock for Coverage
+
+**Do NOT mock these components**:
+- Logger components (`module-logger:logger`) - Ignored from coverage
+
+**DO mock these components**:
+- External service calls (Salesforce, HTTP, Database connectors)
+- Notification Connector operations (mock but file is in ignoreFiles)
+- System timestamp operations (for deterministic tests)
+
+### Validation - Verify Call Pattern
+
+Use `verify-call` in the validation section to verify that specific components were called during test execution.
+
+![Validation Flow](/.cursor/projects/Users-sbajpayee-Documents-API-Spec-Cursor-Workspace/assets/image-abda4e7c-5511-41dd-9ed0-224973a4cdae.png)
+
+**Common Verify Calls in Validation Section**:
+
+```xml
+<munit:validation>
+    <!-- Verify Success Logger was called -->
+    <munit-tools:verify-call processor="module-logger:logger" atLeast="1" doc:name="Verify call Success Logger">
+        <munit-tools:with-attributes>
+            <munit-tools:with-attribute attributeName="doc:name" whereValue="Success Logger"/>
+        </munit-tools:with-attributes>
+    </munit-tools:verify-call>
+    
+    <!-- Verify Custom Error Component was called (for error scenarios) -->
+    <munit-tools:verify-call processor="module-custom-error:custom-error" atLeast="1" doc:name="Verify call Custom Error Component">
+        <munit-tools:with-attributes>
+            <munit-tools:with-attribute attributeName="doc:name" whereValue="Custom Error Component"/>
+        </munit-tools:with-attributes>
+    </munit-tools:verify-call>
+    
+    <!-- Verify Notification Connector was called -->
+    <munit-tools:verify-call processor="module-notification:send-notification" atLeast="1" doc:name="Verify call Notification Connector">
+        <munit-tools:with-attributes>
+            <munit-tools:with-attribute attributeName="doc:name" whereValue="Notification Connector"/>
+        </munit-tools:with-attributes>
+    </munit-tools:verify-call>
+    
+    <!-- Verify DLQ was called (for error scenarios) -->
+    <munit-tools:verify-call processor="anypoint-mq:publish" atLeast="1" doc:name="Verify call DLQ">
+        <munit-tools:with-attributes>
+            <munit-tools:with-attribute attributeName="doc:name" whereValue="DLQ"/>
+        </munit-tools:with-attributes>
+    </munit-tools:verify-call>
+</munit:validation>
+```
+
+**When to use each verify call**:
+| Component | Use Case |
+|-----------|----------|
+| Success Logger | Verify logging occurred on successful flows |
+| Custom Error Component | Verify error handling was triggered (error scenarios) |
+| Notification Connector | Verify error notifications were sent (error scenarios) |
+| DLQ | Verify failed messages were sent to Dead Letter Queue (error scenarios) |
+
+## Directory Structure
+
+### Test Data Organization
+All test data MUST be organized in the following structure:
+
+```
+src/test/
+├── munit/
+│   ├── {operation}-test-suite.xml     # Test suite per operation
+│   └── common-test-suite.xml          # Common/shared tests (ping, health-check)
+└── resources/
+    └── testdata/
+        └── {test-suite-name}/
+            ├── business-inbound/      # HTTP input payloads (request payloads sent to the API)
+            ├── business-outbound/     # Expected HTTP response payloads (API responses)
+            ├── technical-inbound/     # Data sent to external services (outbound technical calls)
+            └── technical-outbound/    # Responses from external services (mocked responses)
+```
+
+### Directory Purpose Definitions
+
+**business-inbound/**
+- Contains the JSON/XML/CSV payloads that simulate API requests
+- These represent the data sent by API consumers to your endpoints
+- Example: POST body sent to `/orders/create`
+
+**business-outbound/**
+- Contains the expected JSON/XML response payloads from your API
+- These represent what your API should return to consumers
+- Example: Success response with status 201, error response with status 400
+
+**technical-inbound/**
+- Contains the payloads that your application sends to external systems
+- These are used in spy assertions to verify what data is being sent out
+- Example: SOAP request XML sent to backend service, SQL query parameters
+
+**technical-outbound/**
+- Contains the mock responses from external systems
+- These are used to mock external service responses in tests
+- Example: REST response JSON from backend API, Database query results
+
+### Creating Test Data - Best Practices
+
+**Step 1: Ask User for Sample Data**
+Always ask the user if they have sample input/output examples available:
+- Request payload examples (for business-inbound)
+- Expected response examples (for business-outbound)
+- External system response samples (for technical-outbound)
+
+> "Do you have any sample payloads or examples for this API? Having real examples helps create accurate test data."
+
+**Step 2: If No Examples Provided - Derive from Code**
+When user doesn't have examples, analyze the following to understand payload structure:
+
+1. **Transform Message / DataWeave files** (`src/main/resources/dwls/*.dwl`)
+   - Examine input/output types
+   - Look at field mappings and transformations
+   - Identify required vs optional fields
+
+2. **API Specification** (RAML/OAS files)
+   - Check request/response schemas
+   - Look at example sections in the spec
+   - Review data types and constraints
+
+3. **Connector Metadata**
+   - Salesforce object definitions
+   - Database table schemas
+   - HTTP request/response structures
+
+4. **Flow Variables and Attributes**
+   - Check `set-variable` components for expected data
+   - Review `attributes` usage (headers, query params)
+
+**Example - Deriving Test Data from Transform**:
+```dwl
+// If you see this transform in the flow:
+%dw 2.0
+output application/json
+---
+{
+    compositeRequest: payload.queries map (query, index) -> {
+        method: "GET",
+        url: "/services/data/v61.0/query/?q=" ++ query.soql,
+        referenceId: query.referenceId
+    }
+}
+
+// Create test data matching the INPUT structure:
+{
+    "queries": [
+        { "soql": "SELECT Id FROM Account", "referenceId": "ref1" },
+        { "soql": "SELECT Id FROM Contact", "referenceId": "ref2" }
+    ]
+}
+```
+
+## File Naming Convention
+
+### Test Data Files
+**Pattern**: `{operation}-{scenario}-{type}.{extension}`
+
+**Components**:
+- **operation**: The operation name (kebab-case) - e.g., `create-order`, `get-customer`, `upsert-data`
+- **scenario**: Test scenario type - e.g., `success`, `error`, `validation-error`, `partial-success`, `not-found`
+- **type**: Request or response indicator - `request`, `response`
+- **extension**: File type based on content - `.json`, `.xml`, `.dwl`, `.csv`
+
+**Examples**:
+```
+business-inbound/
+├── create-order-success-request.json
+├── create-order-validation-error-request.json
+└── create-order-duplicate-request.json
+
+business-outbound/
+├── create-order-success-response.json
+├── create-order-error-response.json
+└── create-order-partial-success-response.json
+
+technical-inbound/
+├── create-order-success-request.xml
+└── create-order-error-request.xml
+
+technical-outbound/
+├── create-order-success-response.xml
+├── create-order-error-response.xml
+└── create-order-connectivity-error-response.xml
+```
+
+### Test Suite File Naming
+**Pattern**: `{operation}-test-suite.xml`
+
+**Examples**:
+- `create-order-test-suite.xml`
+- `get-customer-test-suite.xml`
+- `upsert-data-test-suite.xml`
+
+### Test Case Naming
+**Pattern**: `{prefix}-{operation}-{scenario}-test-suite`
+
+**Components**:
+- **prefix**: Project/module identifier (e.g., `sfl`, `ord`, `cust`, `inv`)
+- **operation**: The operation being tested (e.g., `get-timestamp`, `create-order`, `fetch-customer`)
+- **scenario**: Test scenario type (e.g., `success`, `connectivity-issue`, `partial-success`, `validation-error`)
+
+**Examples**:
+- `sfl-get-timestamp-test-suite` (success scenario - scenario can be omitted for default success)
+- `sfl-get-timestamp-connectivity-issue-test-suite`
+- `ord-create-order-success-test-suite`
+- `ord-create-order-partial-success-test-suite`
+- `cust-fetch-customer-not-found-test-suite`
+
+## Test Implementation Template
+
+### Standard Test Structure
+Every test MUST follow this structure:
+
+```xml
+<munit:test name="{prefix}-{operation}-{scenario}-test-suite" 
+            description="Test {scenario} scenario for {operation}"
+            tags="{TAG}">
+    
+    <!-- 1. BEHAVIOR: SET INPUT PAYLOAD & CONFIGURE MOCKS -->
+    <munit:behavior>
+        <!-- Mock external services (Technical Outbound) -->
+        <munit-tools:mock-when processor="{connector}:{operation}" doc:name="Mock {Service Name}">
+            <munit-tools:with-attributes>
+                <munit-tools:with-attribute attributeName="doc:name" whereValue="{connector-doc-name}"/>
+            </munit-tools:with-attributes>
+            <munit-tools:then-return>
+                <munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/{suite-name}/technical-outbound/{operation}-{scenario}-response.json')]"/>
+                <munit-tools:attributes value="#[{statusCode: 200}]"/>
+            </munit-tools:then-return>
+        </munit-tools:mock-when>
+        
+        <!-- Spy on external calls (Technical Inbound) - Optional -->
+        <!-- NOTE: Use <before-call> NOT <assertions> inside spy! -->
+        <munit-tools:spy processor="{connector}:{operation}" doc:name="Spy {Service Name}">
+            <munit-tools:with-attributes>
+                <munit-tools:with-attribute attributeName="doc:name" whereValue="{connector-doc-name}"/>
+            </munit-tools:with-attributes>
+            <munit-tools:before-call>
+                <munit-tools:assert-that 
+                    expression="#[write(payload, 'application/json')]" 
+                    is="#[MunitTools::equalTo(write(readUrl('classpath://testdata/{suite-name}/technical-inbound/{operation}-{scenario}-request.json', 'application/json'), 'application/json'))]"
+                    message="Technical inbound payload mismatch"
+                    doc:name="Assert Technical Inbound Payload"/>
+            </munit-tools:before-call>
+        </munit-tools:spy>
+    </munit:behavior>
+    
+    <!-- 2. EXECUTION: SET INPUT & EXECUTE FLOW -->
+    <munit:execution>
+        <munit:set-event doc:name="Set {Operation} Request Payload">
+            <munit:payload value="#[output application/json --- readUrl('classpath://testdata/{suite-name}/business-inbound/{operation}-{scenario}-request.json')]"/>
+        </munit:set-event>
+        
+        <flow-ref doc:name="Call {flow-name}" name="{apikit-flow-name}"/>
+    </munit:execution>
+    
+    <!-- 3. VALIDATION: ASSERTIONS -->
+    <munit:validation>
+        <!-- Assert HTTP Status Code -->
+        <munit-tools:assert-that expression="#[vars.httpStatus]" 
+                                 is="#[MunitTools::equalTo(200)]" 
+                                 message="Expected status code 200"
+                                 doc:name="Assert HTTP Status Code"/>
+        
+        <!-- Assert Response Payload (Business Outbound) -->
+        <munit-tools:assert-equals doc:name="Assert Response Payload" 
+                                   actual="#[payload]" 
+                                   expected="#[output application/json --- readUrl('classpath://testdata/{suite-name}/business-outbound/{operation}-{scenario}-response.json')]"/>
+        
+        <!-- Verify flow calls -->
+        <munit-tools:verify-call doc:name="Verify {flow} called" 
+                                 processor="mule:flow-ref" 
+                                 times="1">
+            <munit-tools:with-attributes>
+                <munit-tools:with-attribute whereValue="{flow-name}" attributeName="name"/>
+            </munit-tools:with-attributes>
+        </munit-tools:verify-call>
+    </munit:validation>
+</munit:test>
+```
+
+## Critical Implementation Rules
+
+### 1. DataWeave Wrapping for readUrl
+**ALWAYS** wrap `readUrl()` with DataWeave output directive:
+
+✅ **CORRECT:**
+```xml
+value="#[output application/json --- readUrl('classpath://testdata/suite/business-inbound/create-order-success-request.json')]"
+```
+
+❌ **INCORRECT:**
+```xml
+value="#[readUrl('classpath://testdata/suite/business-inbound/create-order-success-request.json')]"
+```
+
+### 2. File Type Handling
+Choose appropriate output format based on file content:
+
+- **JSON files**: `output application/json ---`
+- **XML files**: `output application/xml ---`
+- **CSV files**: `output text/csv ---`
+- **DWL files**: `readUrl("classpath://path/file.dwl",'application/dw')`
+
+### 3. Alternative Test Data Loading
+```xml
+<!-- Using MunitTools -->
+<munit:payload value="#[MunitTools::getResourceAsString('testdata/suite/business-inbound/create-order-success-request.json')]" 
+               mediaType="application/json"/>
+```
+
+### 4. DataWeave Syntax in MunitTools::equalTo()
+**CRITICAL**: You CANNOT use `output application/json ---` header directive inside function arguments like `MunitTools::equalTo()`.
+
+❌ **INCORRECT** (will cause parse error):
+```xml
+is="#[MunitTools::equalTo(output application/json --- readUrl('classpath://...'))]"
+```
+
+✅ **CORRECT** (use write() and readUrl() functions):
+```xml
+expression="#[write(payload, 'application/json')]" 
+is="#[MunitTools::equalTo(write(readUrl('classpath://testdata/suite/file.json', 'application/json'), 'application/json'))]"
+```
+
+**Explanation**:
+- `write(payload, 'application/json')` - Converts payload object to JSON string
+- `readUrl('classpath://...', 'application/json')` - Reads file and parses as JSON object
+- `write(..., 'application/json')` - Converts to JSON string for comparison
+
+### 5. Property Values are Strings
+When using `p('property.name')` in DataWeave, the value is always a **STRING**, not the native type.
+
+**Example**: If `config.properties` has `sfl.compositeQuery.allOrNone=true`
+
+```dwl
+// In your flow DWL:
+{
+    allOrNone: p('sfl.compositeQuery.allOrNone')  // Returns STRING "true", NOT boolean true
+}
+```
+
+**Impact on test data files**:
+```json
+// technical-inbound file must match the actual output
+{
+    "allOrNone": "true",    // STRING - matches p() output
+    "compositeRequest": [...]
+}
+
+// NOT this:
+{
+    "allOrNone": true,      // BOOLEAN - will NOT match!
+    "compositeRequest": [...]
+}
+```
+
+**Tip**: If you need boolean in flow, cast explicitly: `p('property') as Boolean`
+
+## Mock Configuration Patterns
+
+### Mock HTTP Request (REST APIs)
+```xml
+<munit-tools:mock-when processor="http:request" doc:name="Mock REST Backend">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="{http-request-doc-name}"/>
+        <munit-tools:with-attribute attributeName="config-ref" whereValue="{HTTP_Request_configuration}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/{suite}/technical-outbound/{operation}-success-response.json')]"/>
+        <munit-tools:attributes value="#[{statusCode: 200}]"/>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+```
+
+### Mock Database Connector
+```xml
+<munit-tools:mock-when processor="db:select" doc:name="Mock Database Query">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="{query-doc-name}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/{suite}/technical-outbound/{operation}-success-response.json')]"/>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+```
+
+### Mock Salesforce Connector
+```xml
+<munit-tools:mock-when processor="salesforce:query" doc:name="Mock Salesforce Query">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="{query-doc-name}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/{suite}/technical-outbound/{operation}-success-response.json')]"/>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+
+<munit-tools:mock-when processor="salesforce-composite:execute-composite-request" doc:name="Mock SF Composite">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="Execute composite request"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/{suite}/technical-outbound/{operation}-success-response.json')]" 
+                            mediaType="application/json"/>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+```
+
+### Mock Flow Reference
+```xml
+<munit-tools:mock-when processor="mule:flow-ref" doc:name="Mock {flow-name}">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="name" whereValue="{flow-name}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/{suite}/technical-outbound/{operation}-success-response.json')]"/>
+        <munit-tools:variables>
+            <munit-tools:variable key="success" value="#[true]"/>
+            <munit-tools:variable key="httpStatus" value="#[200]"/>
+        </munit-tools:variables>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+```
+
+### Mock Any Connector (Generic Pattern)
+```xml
+<munit-tools:mock-when processor="{connector-namespace}:{operation}" doc:name="Mock {Service}">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="{doc-name}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:payload value="#[...]" mediaType="application/json"/>
+        <munit-tools:attributes value="#[{statusCode: 200}]"/>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+```
+
+## Error Simulation Patterns
+
+### Connectivity Error
+```xml
+<munit-tools:mock-when processor="{connector}:{operation}" doc:name="Mock Connectivity Error">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="{doc-name}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:then-return>
+        <munit-tools:error typeId="{CONNECTOR}:CONNECTIVITY"/>
+    </munit-tools:then-return>
+</munit-tools:mock-when>
+```
+
+### Common Error Types by Connector
+| Connector | Error Types |
+|-----------|-------------|
+| HTTP | `HTTP:CONNECTIVITY`, `HTTP:TIMEOUT`, `HTTP:UNAUTHORIZED`, `HTTP:BAD_REQUEST`, `HTTP:NOT_FOUND` |
+| Database | `DB:CONNECTIVITY`, `DB:QUERY_EXECUTION`, `DB:BAD_SQL_SYNTAX` |
+| Salesforce | `SALESFORCE:CONNECTIVITY`, `SALESFORCE-COMPOSITE:CONNECTIVITY`, `SF:INVALID_SESSION` |
+| Validation | `VALIDATION:INVALID_BOOLEAN`, `VALIDATION:BLANK_STRING`, `VALIDATION:NULL` |
+| APIKit | `APIKIT:BAD_REQUEST`, `APIKIT:NOT_FOUND`, `APIKIT:METHOD_NOT_ALLOWED` |
+| Mule Core | `MULE:RETRY_EXHAUSTED`, `MULE:EXPRESSION`, `MULE:ROUTING` |
+
+### IMPORTANT: Understanding Error Types in Tests
+
+The error type you should expect in your test depends on how errors are handled in your flow. The final error type is often different from the original error thrown by a connector.
+
+#### Error Handling Pattern with vars.errorDetails
+Many Mule applications use a pattern where error details are stored in `vars.errorDetails` and the global error handler's `process-error` component uses this variable to determine the error response:
+
+```xml
+<!-- In error handler -->
+<module-error-handler-plugin:process-error error="#[vars.errorDetails default error]">
+```
+
+**Key insight**: The original error type is preserved in `vars.errorDetails`, but the error that propagates through the flow may be different (e.g., wrapped by retry logic or transformed by error handlers).
+
+#### Common Error Flow Patterns
+
+**Pattern 1: With until-successful (Retry)**
+```
+Mock throws SALESFORCE-COMPOSITE:CONNECTIVITY
+        │
+        ▼
+until-successful retries (based on maxRetries)
+        │
+        ▼
+Retries exhausted → MULE:RETRY_EXHAUSTED  ◄── Final propagated error
+        │
+        ▼
+Error handler uses vars.errorDetails (original error preserved)
+```
+
+**Pattern 2: With on-error-continue + raise-error + global error handler (on-error-continue)**
+```
+Mock throws HTTP:BAD_REQUEST (or any error)
+        │
+        ▼
+on-error-continue catches error (in try block)
+        │
+        ▼
+vars.errorDetails = error (original HTTP:BAD_REQUEST stored)
+vars.success = false
+        │
+        ▼
+Flow continues...
+        │
+        ▼
+check-for-raise-error-sub-flow checks vars.success
+        │
+        ▼
+(vars.success == false) → raise-error APP:CONNECTIVITY_FAILED
+        │                  (error TYPE changes here, but vars.errorDetails still has original)
+        ▼
+Global error handler catches with <on-error-continue>
+        │
+        ▼
+process-error uses error="#[vars.errorDetails default error]"
+        │
+        ▼
+process-error builds response from vars.errorDetails (ORIGINAL error):
+  - HTTP Status: 400 (from original HTTP:BAD_REQUEST)
+  - Payload: {
+      "error": {
+        "code": 400,
+        "reason": "Bad Request",
+        "message": "Required header 'sourceSystem' not specified"
+      }
+    }
+        │
+        ▼
+vars.httpStatus = attributes.httpStatus (400)
+        │
+        ▼
+Flow returns normally with error response
+        │
+        ▼
+Test receives: NO ERROR propagates (on-error-continue handled it)
+              → Assert on vars.httpStatus (400) and response payload
+```
+
+**Key Points**:
+1. `raise-error` changes the error TYPE to `APP:CONNECTIVITY_FAILED`
+2. BUT `vars.errorDetails` still contains the ORIGINAL error (HTTP:BAD_REQUEST)
+3. `process-error` uses `vars.errorDetails` to build the response with CORRECT status/payload
+4. Global error handler uses `<on-error-continue>`, so NO error propagates to test
+5. Test should assert on `vars.httpStatus` and response payload (both from original error)
+
+**Pattern 3: Direct Error Propagation**
+```
+Mock throws VALIDATION:INVALID_BOOLEAN
+        │
+        ▼
+No retry, no continue → Error propagates directly
+        │
+        ▼
+Test receives: VALIDATION:INVALID_BOOLEAN
+```
+
+#### When to Expect Which Error Type
+
+| Flow Pattern | vars.errorDetails | expectedErrorType | What Test Should Assert |
+|--------------|-------------------|-------------------|-------------------------|
+| With `until-successful` (retries exhausted) | Original error | `MULE:RETRY_EXHAUSTED` | Error type propagates |
+| Global handler with `on-error-continue` | Original error | **None** - no error propagates | `vars.httpStatus` + response payload |
+| Global handler with `on-error-propagate` | Original error | Error type from `raise-error` | Error type propagates |
+| Direct connector call (no handler) | N/A | Original error type | Error type propagates |
+| Validation failure (before try block) | N/A | `VALIDATION:INVALID_BOOLEAN` | Error type propagates |
+
+**How Error Response is Built (with on-error-continue)**:
+
+Example: HTTP:BAD_REQUEST flows through the system:
+```
+1. Connector throws HTTP:BAD_REQUEST (code 400)
+        ↓
+2. on-error-continue catches → stores in vars.errorDetails
+        ↓
+3. raise-error throws APP:CONNECTIVITY_FAILED (type changes, but vars.errorDetails unchanged)
+        ↓
+4. Global handler catches APP:CONNECTIVITY_FAILED with <on-error-continue>
+        ↓
+5. process-error reads error="#[vars.errorDetails default error]" 
+   → Gets ORIGINAL error (HTTP:BAD_REQUEST) NOT APP:CONNECTIVITY_FAILED
+        ↓
+6. Builds response from ORIGINAL error:
+   vars.httpStatus = 400
+   payload = {
+     "error": {
+       "code": 400,
+       "reason": "Bad Request", 
+       "message": "Required header 'sourceSystem' not specified"
+     }
+   }
+        ↓
+7. Flow completes normally (no error propagates)
+        ↓
+8. Test asserts: vars.httpStatus=400, payload.error.code=400, payload.error.reason="Bad Request"
+```
+
+**Key Points**: 
+- `raise-error` changes the error TYPE, but does NOT change `vars.errorDetails`
+- `process-error` component always reads from `vars.errorDetails` to build the correct response
+- The HTTP status and error payload reflect the ORIGINAL error, not the raise-error type
+- When global handler uses `<on-error-continue>`, test should assert on response, NOT use `expectedErrorType`
+
+#### Testing Error Scenarios
+
+**For retry-wrapped errors (until-successful)**:
+```xml
+<munit:test name="..." expectedErrorType="MULE:RETRY_EXHAUSTED" tags="ERROR">
+    <!-- Error propagates because until-successful throws MULE:RETRY_EXHAUSTED -->
+</munit:test>
+```
+
+**For validation errors (before any error handler)**:
+```xml
+<munit:test name="..." expectedErrorType="VALIDATION:INVALID_BOOLEAN" tags="ERROR">
+    <!-- Error propagates directly, no handler catches it first -->
+</munit:test>
+```
+
+**For flows with global on-error-continue** (MOST COMMON - error is handled):
+```xml
+<munit:test name="..." tags="ERROR">
+    <!-- NO expectedErrorType - global error handler uses on-error-continue -->
+    <!-- Error is handled, flow returns error response built from vars.errorDetails -->
+    <munit:validation>
+        <!-- Assert HTTP status (comes from original error via process-error) -->
+        <munit-tools:assert-that expression="#[vars.httpStatus]" 
+                                 is="#[MunitTools::equalTo(400)]"
+                                 message="Expected HTTP status 400 (Bad Request)"/>
+        
+        <!-- Assert error response payload (built from vars.errorDetails - original error) -->
+        <munit-tools:assert-that expression="#[payload.error.code]" 
+                                 is="#[MunitTools::equalTo(400)]"
+                                 message="Expected error code 400"/>
+        <munit-tools:assert-that expression="#[payload.error.reason]" 
+                                 is="#[MunitTools::equalTo('Bad Request')]"
+                                 message="Expected reason Bad Request"/>
+    </munit:validation>
+</munit:test>
+```
+
+**Key Points**:
+- If global error handler uses `<on-error-continue>`, do NOT use `expectedErrorType`
+- The error response (status, code, reason, message) comes from ORIGINAL error stored in `vars.errorDetails`
+- Even though `raise-error` may throw `APP:CONNECTIVITY_FAILED`, the response reflects the original error
+- `process-error` component reads `vars.errorDetails` to build the correct response
+
+### Expected Error Type in Test
+```xml
+<munit:test name="{prefix}-{operation}-validation-error-test-suite" 
+            description="Test validation error scenario" 
+            expectedErrorType="VALIDATION:INVALID_BOOLEAN"
+            tags="ERROR">
+    <munit:execution>
+        <munit:set-event doc:name="Set Invalid Input">
+            <munit:payload value="#[output application/json --- readUrl('classpath://testdata/{suite}/business-inbound/{operation}-validation-error-request.json')]"/>
+        </munit:set-event>
+        <flow-ref doc:name="Call Flow" name="{flow-name}"/>
+    </munit:execution>
+</munit:test>
+```
+
+## Spy Configuration
+
+### IMPORTANT: Spy XML Structure
+The `<munit-tools:spy>` element accepts ONLY these child elements:
+- `<munit-tools:with-attributes>` - to identify which processor to spy on
+- `<munit-tools:before-call>` - assertions that run BEFORE the processor executes (verify INPUT)
+- `<munit-tools:after-call>` - assertions that run AFTER the processor executes (verify OUTPUT)
+
+**WARNING**: Do NOT use `<munit-tools:assertions>` directly inside spy - it will cause XML validation error!
+
+### Spy to Verify Outbound Calls (Technical Inbound)
+```xml
+<munit-tools:spy processor="{connector}:{operation}" doc:name="Spy {Service}">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:name" whereValue="{doc-name}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:before-call>
+        <munit-tools:assert-that 
+            expression="#[write(payload, 'application/json')]" 
+            is="#[MunitTools::equalTo(write(readUrl('classpath://testdata/{suite}/technical-inbound/{operation}-success-request.json', 'application/json'), 'application/json'))]"
+            message="Request payload to backend does not match expected"
+            doc:name="Assert Technical Inbound Payload"/>
+    </munit-tools:before-call>
+</munit-tools:spy>
+```
+
+### Spy with After-Call Assertions
+```xml
+<munit-tools:spy processor="ee:transform" doc:name="Spy Transform">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="doc:id" whereValue="{transform-doc-id}"/>
+    </munit-tools:with-attributes>
+    <munit-tools:after-call>
+        <munit-tools:assert-that expression="#[payload]" is="#[MunitTools::notNullValue()]" 
+                                 doc:name="Assert Payload Not Null"/>
+        <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(200)]" 
+                                 doc:name="Assert HTTP Status"/>
+    </munit-tools:after-call>
+</munit-tools:spy>
+```
+
+### Spy Visual Flow
+```
+┌─────────────────────────────────────────┐
+│           munit-tools:spy               │
+│                                         │
+│  ┌───────────────────────────────────┐  │
+│  │  <munit-tools:before-call>        │  │
+│  │  (runs BEFORE processor)          │  │
+│  │  - Verify INPUT payload           │  │
+│  │  - Use for technical-inbound      │  │
+│  └───────────────────────────────────┘  │
+│                  │                      │
+│                  ▼                      │
+│  ┌───────────────────────────────────┐  │
+│  │   Actual Processor Executes       │  │
+│  └───────────────────────────────────┘  │
+│                  │                      │
+│                  ▼                      │
+│  ┌───────────────────────────────────┐  │
+│  │  <munit-tools:after-call>         │  │
+│  │  (runs AFTER processor)           │  │
+│  │  - Verify OUTPUT payload          │  │
+│  └───────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+```
+
+## CRITICAL: Analyze Error Handling Flow BEFORE Designing Tests
+
+**This is the most important step for error scenario tests.** Before writing ANY error test, you MUST trace through the actual code to understand:
+
+1. **Where does the error occur?**
+2. **Is there a try/catch (on-error-continue) that handles it locally?**
+3. **Does the error propagate to the global error handler?**
+4. **What components (notification, DLQ) will be called?**
+
+### Error Handling Analysis Checklist
+
+For each error scenario, answer these questions by examining the actual flow XML:
+
+| Question | Check | Impact on Test |
+|----------|-------|----------------|
+| Is the failing call wrapped in a `try` block? | Look for `<try>` around the call | Determines if error can be caught locally |
+| Does the try block have `on-error-continue`? | Check error handler inside try | If yes, flow CONTINUES - no global handler |
+| Does the try block have `on-error-propagate`? | Check error handler inside try | If yes, error propagates to parent |
+| Is there a global `error-handler` reference? | Check main flow for `error-handler ref=` | Determines if notification/DLQ will be called |
+| What's in the global error handler? | Read global-error-handler.xml | Know what to mock/verify |
+
+### Example: Tracing Error Flow
+
+**Scenario: ASPN API Call Fails**
+```
+Code Path Analysis:
+1. benefits-investigation-mq-consumer.xml line 29: <try>
+2. Line 43: flow-ref to aspn-outbound-sys-request-flow
+3. Line 44-54: <error-handler> with <on-error-continue>
+   → Error is CAUGHT HERE, flow CONTINUES
+
+Result: NO global error handler, NO notification, NO DLQ
+       → Test should verify notification times="0", DLQ times="0"
+```
+
+**Scenario: SFL API Call Fails**
+```
+Code Path Analysis:
+1. benefits-investigation-mq-consumer.xml line 56: flow-ref to sf-transaction-log-subflow
+   → NO try block around this call!
+2. sf-transaction-log.xml calls sfl-sys-api-request-flow
+3. Error propagates up to main flow
+4. Global error handler catches it → notification + DLQ called
+
+Result: Global error handler IS triggered
+       → Test should mock AND verify notification, DLQ
+```
+
+### Test Design Based on Error Analysis
+
+**When error is caught by local `on-error-continue`:**
+```xml
+<munit:test name="..." tags="ERROR">
+    <munit:behavior>
+        <!-- Mock the failing service -->
+        <munit-tools:mock-when processor="http:request">
+            <munit-tools:then-return>
+                <munit-tools:error typeId="HTTP:CONNECTIVITY"/>
+            </munit-tools:then-return>
+        </munit-tools:mock-when>
+        
+        <!-- NO mock for notification/DLQ - they should NOT be called -->
+    </munit:behavior>
+    
+    <munit:validation>
+        <!-- Verify notification was NOT sent -->
+        <munit-tools:verify-call processor="module-notification:call-notification-api" 
+                                 times="0" doc:name="Verify Notification NOT Sent"/>
+        
+        <!-- Verify DLQ was NOT called -->
+        <munit-tools:verify-call processor="anypoint-mq:publish" 
+                                 times="0" doc:name="Verify DLQ NOT Called"/>
+        
+        <!-- Verify flow continued (success-response was still called) -->
+        <munit-tools:verify-call processor="mule:flow-ref" atLeast="1">
+            <munit-tools:with-attributes>
+                <munit-tools:with-attribute attributeName="name" whereValue="success-response-sub-flow"/>
+            </munit-tools:with-attributes>
+        </munit-tools:verify-call>
+    </munit:validation>
+</munit:test>
+```
+
+**When error propagates to global error handler:**
+```xml
+<munit:test name="..." tags="ERROR">
+    <munit:behavior>
+        <!-- Mock the failing service -->
+        <munit-tools:mock-when processor="http:request">
+            <munit-tools:then-return>
+                <munit-tools:error typeId="HTTP:CONNECTIVITY"/>
+            </munit-tools:then-return>
+        </munit-tools:mock-when>
+        
+        <!-- MUST mock notification and DLQ - they WILL be called -->
+        <munit-tools:mock-when processor="module-notification:call-notification-api">
+            <munit-tools:then-return>
+                <munit-tools:payload value="#[{status: 'sent'}]"/>
+            </munit-tools:then-return>
+        </munit-tools:mock-when>
+        
+        <munit-tools:mock-when processor="anypoint-mq:publish">
+            <munit-tools:then-return>
+                <munit-tools:payload value="#[{status: 'published'}]"/>
+            </munit-tools:then-return>
+        </munit-tools:mock-when>
+    </munit:behavior>
+    
+    <munit:validation>
+        <!-- Verify notification WAS sent -->
+        <munit-tools:verify-call processor="module-notification:call-notification-api" 
+                                 atLeast="1" doc:name="Verify Notification Sent"/>
+        
+        <!-- Verify DLQ WAS called -->
+        <munit-tools:verify-call processor="anypoint-mq:publish" 
+                                 atLeast="1" doc:name="Verify DLQ Called"/>
+    </munit:validation>
+</munit:test>
+```
+
+### Common Mistakes to Avoid
+
+1. **Assuming all errors go to global handler**: Check for local try/catch blocks first!
+2. **Not checking on-error-continue vs on-error-propagate**: They behave very differently
+3. **Mocking components that won't be called**: This can hide bugs
+4. **Not verifying components that SHOULD be called**: Missing assertions
+5. **Using expectedErrorType when error is handled**: If `on-error-continue` handles it, no error propagates
+
+---
+
+## Standard Test Scenarios
+
+### Required Test Scenarios
+Every operation SHOULD have tests for the following scenarios:
+
+| Scenario | Tag | Status Code | Description |
+|----------|-----|-------------|-------------|
+| Success | `SUCCESS` | 200/201 | Happy path validation |
+| Connectivity Error | `ERROR` | 500 | Backend system connectivity failure |
+| Partial Success | `PARTIAL SUCCESS` | 200/207 | Mixed results in batch/composite operations |
+| Validation Error | `ERROR` | 400 | Input validation failures |
+| Not Found | `ERROR` | 404 | Resource not found scenarios |
+| Service Error | `ERROR` | 500 | Backend service errors (timeouts, faults) |
+
+### Test Tags
+Use `tags` attribute for categorization:
+```xml
+<munit:test name="..." tags="SUCCESS">
+<munit:test name="..." tags="ERROR">
+<munit:test name="..." tags="PARTIAL SUCCESS">
+```
+
+## Assertion Patterns
+
+### Assert Equals
+```xml
+<munit-tools:assert-equals doc:name="Assert Response" 
+                           actual="#[payload]" 
+                           expected="#[output application/json --- readUrl('classpath://testdata/{suite}/business-outbound/{operation}-success-response.json')]"/>
+```
+
+### Assert That with Matchers
+```xml
+<munit-tools:assert-that expression="#[vars.httpStatus]" 
+                         is="#[MunitTools::equalTo(200)]" 
+                         message="Expected HTTP status 200"/>
+
+<munit-tools:assert-that expression="#[payload]" 
+                         is="#[MunitTools::notNullValue()]"/>
+
+<munit-tools:assert-that expression="#[payload.errors[0].code]" 
+                         is="#[MunitTools::containsString('ERR')]"/>
+
+<munit-tools:assert-that expression="#[sizeOf(payload.items)]" 
+                         is="#[MunitTools::greaterThan(0)]"/>
+```
+
+### Verify Call Count
+```xml
+<munit-tools:verify-call processor="mule:flow-ref" times="1" doc:name="Verify Flow Called Once">
+    <munit-tools:with-attributes>
+        <munit-tools:with-attribute attributeName="name" whereValue="{flow-name}"/>
+    </munit-tools:with-attributes>
+</munit-tools:verify-call>
+```
+
+## Common Patterns and Best Practices
+
+### 1. Test Isolation
+- Each test should be independent
+- Mock all external dependencies
+- Don't rely on execution order
+
+### 2. Descriptive Names
+Use clear, descriptive names for all test components:
+```xml
+<munit:set-event doc:name="Set Create Order Request Payload"/>
+<munit-tools:mock-when doc:name="Mock Backend Order Service Response"/>
+<munit-tools:assert-that doc:name="Assert Order Created Successfully"/>
+```
+
+### 3. Comprehensive Assertions
+Always assert:
+- HTTP status code (`vars.httpStatus`)
+- Response payload structure
+- Technical inbound payloads (via spies)
+- Flow/processor call verification
+
+### 4. Reusable Test Data
+For common mocks, store in a shared location:
+```
+src/test/resources/testdata/common/
+├── empty-response.json
+├── connectivity-error-response.json
+└── validation-error-response.json
+```
+
+## Quick Reference Checklist
+
+When implementing a new MUnit test, ensure:
+
+- [ ] Test suite file name follows pattern: `{operation}-test-suite.xml`
+- [ ] Test case names follow pattern: `{prefix}-{operation}-{scenario}-test-suite`
+- [ ] Testdata directory structure is created with all four folders
+- [ ] All testdata files use proper naming: `{operation}-{scenario}-{type}.{extension}`
+- [ ] `readUrl()` is wrapped with `output application/json ---` (or appropriate format)
+- [ ] All external services are mocked
+- [ ] Spies are configured for outbound calls (if needed)
+- [ ] HTTP status code is asserted
+- [ ] Response payload is asserted
+- [ ] Success scenario is implemented with tag `SUCCESS`
+- [ ] Error scenarios are implemented with tag `ERROR`
+- [ ] Test data files are properly formatted
+- [ ] Tests are independent and isolated
+- [ ] All `doc:name` attributes are descriptive
+
+---
+
+## Common Pitfalls and Fixes
+
+### 1. XML Parse Error: "Invalid content... assertions"
+**Error**: `cvc-complex-type.2.4.a: Invalid content was found starting with element 'assertions'. One of 'before-call, after-call' is expected.`
+
+**Cause**: Using `<munit-tools:assertions>` inside `<munit-tools:spy>`
+
+**Fix**: Use `<munit-tools:before-call>` or `<munit-tools:after-call>` instead
+
+### 2. DataWeave Parse Error in MunitTools::equalTo()
+**Error**: `Invalid input 'o', expected ')' for the function call`
+
+**Cause**: Using `output application/json ---` inside function argument
+
+**Fix**: Use `write()` and `readUrl()` functions:
+```xml
+is="#[MunitTools::equalTo(write(readUrl('classpath://...', 'application/json'), 'application/json'))]"
+```
+
+### 3. Assertion Fails: Boolean vs String Mismatch
+**Error**: `Expected: "allOrNone": true but was: "allOrNone": "true"`
+
+**Cause**: Properties loaded via `p('prop')` return strings, not booleans
+
+**Fix**: Update test data file to use string: `"allOrNone": "true"`
+
+### 4. Wrong Error Type in Test
+**Error**: `expected:<[APP:CONNECTIVITY_FAIL]ED> but was:<[MULE:RETRY_EXHAUST]ED>`
+
+**Cause**: The error type that propagates to the test differs from what you expect. Common reasons:
+- `until-successful` wraps errors in `MULE:RETRY_EXHAUSTED`
+- `on-error-continue` handles the error (no error propagates)
+- Error handler transforms the error type
+- Original error stored in `vars.errorDetails` but different error propagates
+
+**Fix**: 
+1. Trace the error flow in your Mule application
+2. Identify what error actually propagates (not what's in `vars.errorDetails`)
+3. Update `expectedErrorType` to match the propagated error
+4. For retry scenarios: use `MULE:RETRY_EXHAUSTED`
+5. For handled errors: remove `expectedErrorType` and assert on response instead
+
+### 5. Spy Assertions Not Running
+**Cause**: Spy is placed AFTER mock-when for the same processor
+
+**Fix**: Order matters! Place spy BEFORE or alongside mock-when in behavior section
+
+---
+
+**Remember**: Quality tests are as important as quality code. Invest time in creating comprehensive, maintainable test suites that provide confidence in your application's behavior.

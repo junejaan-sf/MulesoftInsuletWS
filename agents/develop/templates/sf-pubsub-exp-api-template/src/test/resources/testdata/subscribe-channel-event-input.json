@@ -1,0 +1,14 @@
+{
+  "replayId": 12345,
+  "eventId": "evt-abc-001",
+  "data": {
+    "payload": {
+      "SomeField__c": "replace-with-field-value",
+      "AnotherField__c": "replace-with-field-value"
+    },
+    "event": {
+      "EventApiName": "YourEvent__e",
+      "EventApiSchemaId": "replace-with-schema-id"
+    }
+  }
+}

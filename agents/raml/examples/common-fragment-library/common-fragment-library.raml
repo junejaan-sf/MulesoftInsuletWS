@@ -1,0 +1,55 @@
+#%RAML 1.0 Library
+usage: Use this common library in API specification to reuse frequently defined datatypes, security schemes, traits, resource types etc.
+
+types:
+  error-type: !include dataTypes/error-type.raml
+  liveness-probe-type: !include dataTypes/liveliness-probe-type.raml
+  readiness-probe-type: !include dataTypes/readiness-probe-type.raml
+  lead-request-type: !include dataTypes/lead-request-type.raml
+  provider-lead-create-request-type: !include dataTypes/provider-lead-create-request-type.raml
+  lead-response-type: !include dataTypes/lead-response-type.raml
+  patient-lead-update-request-type: !include dataTypes/patient-lead-update-request-type.raml
+  patient-lead-update-response-type: !include dataTypes/patient-lead-update-response-type.raml
+  get-consents-response-type: !include dataTypes/get-consents-response-type.raml
+  update-consents-request-type: !include dataTypes/update-consents-request-type.raml
+  update-consents-response-type: !include dataTypes/update-consents-response-type.raml
+  campaign-membership-request-type: !include dataTypes/campaign-membership-request-type.raml
+  campaign-membership-response-type: !include dataTypes/campaign-membership-response-type.raml
+  providers-facilities-response-type: !include dataTypes/providers-facilities-response-type.raml
+  patient-lead-affiliations-update-request-type: !include dataTypes/patient-lead-affiliations-update-request-type.raml
+  patient-lead-affiliations-update-response-type: !include dataTypes/patient-lead-affiliations-update-response-type.raml
+  provider-lead-request-type: !include dataTypes/provider-lead-request-data-type.raml
+  provider-lead-response-type: !include dataTypes/provider-lead-response-data-type.raml
+  create-patient-lead-request-type: !include dataTypes/create-patient-lead-request-type.raml
+  create-patient-lead-response-type: !include dataTypes/create-patient-lead-response-type.raml
+  consent-item-type: !include dataTypes/consent-item-type.raml
+  token-request-type: !include dataTypes/token-request-type.raml
+  token-response-type: !include dataTypes/token-response-type.raml
+  update-patient-lead-request-type: !include dataTypes/update-patient-lead-request-type.raml
+  update-patient-lead-response-type: !include dataTypes/update-patient-lead-response-type.raml
+  create-provider-lead-request-type: !include dataTypes/create-provider-lead-request-type.raml
+  create-provider-lead-response-type: !include dataTypes/create-provider-lead-response-type.raml
+ 
+traits:
+  client-id-required: !include traits/client-id-required.raml
+  jwt-required: !include traits/jwt-required.raml
+  pageable: !include traits/pagination.raml
+  sortable: !include traits/sortable.raml
+  countable: !include traits/countable.raml
+  order-by: !include traits/order-by.raml
+  time-period: !include traits/time-period.raml
+  timespan-filter-supported: !include traits/timespan-filter-supported.raml
+  traceable: !include traits/traceable.raml
+  common-error-handler: !include traits/error-handling.raml
+  common-headers: !include traits/common-headers.raml
+  system-headers: !include traits/source-target-system.raml
+  fetch-providers-facilities: !include traits/fetch-providers-facilities.raml
+
+resourceTypes:
+  liveliness-probe: !include resourceTypes/health-check-liveliness.raml
+  readiness-probe: !include resourceTypes/health-check-readiness.raml
+  generic: !include resourceTypes/resourceType.raml
+
+securitySchemes:
+  client-id-scheme: !include securitySchemes/client-id-required.raml
+  jwt-scheme: !include securitySchemes/jwt-required.raml

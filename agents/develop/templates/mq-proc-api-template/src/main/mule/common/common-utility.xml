@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:module-notification="http://www.mulesoft.org/schema/mule/module-notification"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+http://www.mulesoft.org/schema/mule/module-notification http://www.mulesoft.org/schema/mule/module-notification/current/mule-module-notification.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+	<!-- =====================================================================
+	     responding-ack-sub-flow
+	     Issues an explicit ACK when the MQ consumer flow succeeds.
+	     Also called from global-error-handler Branch 2 (on-error-continue)
+	     to ACK and discard unrecoverable messages.
+	     Choice: only ack if mqAckToken is present (HTTP calls skip this).
+	     ===================================================================== -->
+	<sub-flow name="responding-ack-sub-flow" doc:name="responding-ack-sub-flow">
+		<choice doc:name="Check if flow triggered through MQ">
+			<when expression="#[!isEmpty(vars.mqAckToken default '')]">
+				<anypoint-mq:ack doc:name="ACK Message"
+					config-ref="anypoint-mq_config"
+					ackToken="#[vars.mqAckToken]" />
+				<module-logger:build-log-without-payload doc:name="Log MQ ACK"
+					config-ref="custom-logger-connector_config"
+					message="Message Acknowledged"
+					tracepoint="FLOW_END"
+					sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+					targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]" />
+			</when>
+			<otherwise>
+				<module-logger:build-log-without-payload doc:name="ACK Not Required"
+					config-ref="custom-logger-connector_config"
+					message="Ack send not required (non-MQ flow)"
+					tracepoint="FLOW_END"
+					sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+					targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]" />
+			</otherwise>
+		</choice>
+	</sub-flow>
+
+	<!-- =====================================================================
+	     common-log-integration-error-details-sub-flow
+	     Called from global-error-handler (both branches) when an error must be
+	     logged as an integration error record in Salesforce via sfl-crm-persona.
+	     Falls back to publish-to-dlq-sub-flow if the flag is enabled.
+
+	     Expects vars.transactionErrorRequest to be set before calling.
+	     ===================================================================== -->
+	<sub-flow name="common-log-integration-error-details-sub-flow" doc:name="common-log-integration-error-details-sub-flow">
+		<ee:transform doc:name="Set Persona Target API Params and DLQ User Properties">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-targetApiParams-sfl-crm-persona-sys-api.dwl" variableName="targetApiParams" />
+				<ee:set-variable variableName="userPropertiesDlq"><![CDATA[output application/json
+---
+{
+    "ErrorCode": attributes.httpStatus default 500,
+    "ErrorMessage": error.description default "Error received in API",
+    "transactionId": correlationId,
+    "SourceSystem": vars.requestContext.sourceSystem default "",
+    "targetSystem": vars.requestContext.targetSystem default "",
+    "replayId": vars.requestContext.entityDetails.replayId default ""
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="Log Integration Error Object Create Payload"
+			config-ref="custom-logger-connector_config"
+			message="Creating integration error object in Salesforce"
+			tracepoint="BEFORE_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.targetApiParams.requestPayload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<try doc:name="Try Persona Request">
+			<flow-ref doc:name="Flow Reference to sfl-crm-persona-sys-api-request-flow"
+				name="sfl-crm-persona-sys-api-request-flow" />
+			<error-handler>
+				<on-error-continue enableNotifications="true" logException="true"
+					doc:name="On Error Continue — Persona Call Failed">
+					<choice doc:name="Check transaction-errors.fallback.dlq.enabled">
+						<when expression="#[(p('transaction-errors.fallback.dlq.enabled') as Boolean)]">
+							<flow-ref doc:name="Flow Reference to publish-to-dlq-sub-flow"
+								name="publish-to-dlq-sub-flow" />
+						</when>
+						<otherwise>
+							<module-logger:build-error-log-without-payload
+								doc:name="Log Persona Request Error"
+								config-ref="custom-logger-connector_config"
+								message="Error sending request to transaction errors API"
+								tracepoint="EXCEPTION"
+								sourceSystem="#[vars.requestContext.sourceSystem]"
+								targetSystem="#[vars.requestContext.targetSystem]"
+								errorType='#[output application/json ---
+vars.errorDetails.errorType.identifier default error.errorType.identifier default "UNKNOWN"]'
+								errorDescription='#[output application/json ---
+vars.errorDetails.message default payload.error.message default error.description default "Unhandled error"]'
+								cause='#[output application/json ---
+vars.errorDetails.cause.message default error.cause.message default "Unhandled error"]'
+								errorCode='#[vars.httpStatus default "500"]'
+								logLevel="INFO" />
+						</otherwise>
+					</choice>
+				</on-error-continue>
+			</error-handler>
+		</try>
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="Log Integration Object Response"
+			config-ref="custom-logger-connector_config"
+			message='#[if(vars.success) "Integration error object created successfully" else "Error while creating integration error object"]'
+			tracepoint="AFTER_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+
+		<module-logger:build-log-without-payload
+			doc:name="Log Integration Error ID"
+			config-ref="custom-logger-connector_config"
+			message='#[if(vars.success) "Logging Salesforce ID of created integration error object" else "Error while creating integration error object"]'
+			tracepoint="AFTER_HTTP_REQUEST"
+			entityDetails='#[output application/json ---
+{
+    "integrationError": (if(vars.success) (payload.id) else null) default ""
+}]'
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</sub-flow>
+
+	<!-- =====================================================================
+	     publish-to-dlq-sub-flow
+	     Publishes the original payload to the DLQ for manual reprocessing.
+	     Called from: common-log-integration-error-details-sub-flow (fallback)
+	     Wrapped in try/on-error-continue — never re-throws.
+	     ===================================================================== -->
+	<sub-flow name="publish-to-dlq-sub-flow" doc:name="publish-to-dlq-sub-flow">
+		<try doc:name="Try DLQ Publish">
+			<module-logger:build-log-with-encrypted-payload
+				doc:name="Log Publishing to DLQ"
+				config-ref="custom-logger-connector_config"
+				message="#['Publishing message to ' ++ (Mule::p('mq.dlq.queueName') default '') ++ ' queue']"
+				tracepoint="APPLICATION_EVENT"
+				entityDetails='#[output application/json
+---
+{
+    "Properties to be sent": vars.userPropertiesDlq
+}]'
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]">
+				<module-logger:body><![CDATA[#[output application/json --- vars.requestContext.originalPayload]]]></module-logger:body>
+			</module-logger:build-log-with-encrypted-payload>
+
+			<anypoint-mq:publish doc:name="Publish to DLQ"
+				config-ref="anypoint-mq_config"
+				destination="${mq.dlq.queueName}">
+				<anypoint-mq:body><![CDATA[#[output application/json --- vars.requestContext.originalPayload]]]></anypoint-mq:body>
+				<anypoint-mq:properties><![CDATA[#[vars.userPropertiesDlq]]]></anypoint-mq:properties>
+			</anypoint-mq:publish>
+
+			<module-logger:build-log-without-payload
+				doc:name="Log DLQ Publish Success"
+				config-ref="custom-logger-connector_config"
+				message="#['Message published to ' ++ (Mule::p('mq.dlq.queueName') default '') ++ ' queue']"
+				tracepoint="APPLICATION_EVENT"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]" />
+
+			<error-handler>
+				<on-error-continue enableNotifications="true" logException="true"
+					doc:name="DLQ Publish Failed">
+					<module-logger:build-error-log-with-encrypted-payload
+						doc:name="Log DLQ Publish Error"
+						config-ref="custom-logger-connector_config"
+						message="#['Error publishing message to ' ++ (Mule::p('mq.dlq.queueName') default '') ++ ' queue']"
+						tracepoint="EXCEPTION"
+						sourceSystem="#[vars.requestContext.sourceSystem]"
+						targetSystem="#[vars.requestContext.targetSystem]"
+						entityDetails='#[output application/json
+---
+{
+    replayId: (vars.requestContext.originalPayload default {}).replayId default "N/A"
+}]'
+						errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+						errorDescription='#[error.description default ""]'
+						cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+						errorCode='#[output application/json --- attributes.httpStatus as String default "500"]'>
+						<module-logger:body><![CDATA[#[output application/json ---
+{
+    "Payload": payload,
+    "Properties": vars.userPropertiesDlq
+}]]]></module-logger:body>
+					</module-logger:build-error-log-with-encrypted-payload>
+					<module-logger:build-error-log-without-payload
+						doc:name="Log DLQ Publish Error Info"
+						config-ref="custom-logger-connector_config"
+						message="#['Error publishing message to ' ++ (Mule::p('mq.dlq.queueName') default '') ++ ' queue']"
+						tracepoint="EXCEPTION"
+						sourceSystem="#[vars.requestContext.sourceSystem]"
+						targetSystem="#[vars.requestContext.targetSystem]"
+						errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+						errorDescription='#[error.description default ""]'
+						cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+						errorCode='#[output application/json --- attributes.httpStatus as String default "500"]' />
+				</on-error-continue>
+			</error-handler>
+		</try>
+	</sub-flow>
+
+	<!-- =====================================================================
+	     send-notification-sub-flow
+	     Sends an error notification via the notification connector.
+	     Called from global-error-handler when a critical failure occurs.
+	     Uses module-notification:call-notification-api (not module-notification:send).
+	     ===================================================================== -->
+	<sub-flow name="send-notification-sub-flow" doc:name="send-notification-sub-flow">
+		<try doc:name="Try Send Notification">
+			<ee:transform doc:name="Notification Input Body">
+				<ee:message />
+				<ee:variables>
+					<ee:set-variable resource="dwls/v-notification-input-body.dwl" variableName="notificationInputBody" />
+				</ee:variables>
+			</ee:transform>
+			<module-logger:build-log-with-masked-payload
+				doc:name="Log Sending Notification"
+				config-ref="custom-logger-connector_config"
+				message="Sending notification through connector"
+				tracepoint="BEFORE_HTTP_REQUEST"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				entityDetails="#[vars.requestContext.entityDetails default null]">
+				<module-logger:body><![CDATA[#[output application/json --- vars.notificationInputBody]]]></module-logger:body>
+			</module-logger:build-log-with-masked-payload>
+			<module-notification:call-notification-api doc:name="Send Error Details"
+				config-ref="notification-connector_config">
+				<module-notification:http-body><![CDATA[#[output application/json --- vars.notificationInputBody]]]></module-notification:http-body>
+				<module-notification:http-headers><![CDATA[#[output application/json --- {
+    'x-correlation-id': correlationId,
+    'client_id': p('notification.api.clientId'),
+    'client_secret': p('notification.api.clientSecret')
+}]]]></module-notification:http-headers>
+			</module-notification:call-notification-api>
+			<module-logger:build-log-without-payload
+				doc:name="Log Notification Sent"
+				config-ref="custom-logger-connector_config"
+				message="Notification sent successfully"
+				tracepoint="AFTER_HTTP_REQUEST"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				entityDetails="#[vars.requestContext.entityDetails default null]" />
+			<error-handler>
+				<on-error-continue enableNotifications="true" logException="true"
+					doc:name="On Error Continue — Notification Failed">
+					<module-logger:build-error-log-with-encrypted-payload
+						doc:name="LOG ERROR"
+						config-ref="custom-logger-connector_config"
+						message="Error sending notification"
+						logLevel="ERROR"
+						tracepoint="EXCEPTION"
+						sourceSystem="#[vars.requestContext.sourceSystem]"
+						targetSystem="#[vars.requestContext.targetSystem]"
+						entityDetails="#[vars.requestContext.entityDetails default null]"
+						cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+						errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+						errorDescription='#[vars.errorDetails.detailedDescription default error.description default ""]'
+						errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]">
+						<module-logger:body><![CDATA[#[output application/json ---
+{
+    error: (vars.errorDetails.description default error.description default "")
+}]]]></module-logger:body>
+					</module-logger:build-error-log-with-encrypted-payload>
+				</on-error-continue>
+			</error-handler>
+		</try>
+	</sub-flow>
+
+	<!-- =====================================================================
+	     success-response-sub-flow
+	     Sets a standard success response payload and logs exit.
+	     Called from mq-consumer-sub-flow after successful downstream processing.
+	     ===================================================================== -->
+	<sub-flow name="success-response-sub-flow" doc:name="success-response-sub-flow">
+		<ee:transform doc:name="DW Set Success Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-common-success-response.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload
+			doc:name="LOG SUCCESS RESPONSE"
+			config-ref="custom-logger-connector_config"
+			message="Message processed successfully"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails="#[vars.requestContext.entityDetails default null]" />
+	</sub-flow>
+
+</mule>

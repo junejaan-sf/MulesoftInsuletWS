@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    log4j2.xml — v3 canonical configuration
+    Three AsyncLogger categories (required):
+      com.insulet.general    → INFO (PROD: WARN)
+      com.insulet.payload    → DEBUG (PROD: WARN)  encrypted-payload loggers
+      com.insulet.datadog    → INFO (PROD: WARN)   DataDog JSON appender
+
+    For PROD environments, all three categories should be set to WARN
+    to avoid leaking data through logs. Adjust the level attribute only.
+    NEVER leave DEBUG or INFO in the PROD log4j2.xml.
+-->
+<Configuration status="WARN" name="mq-proc-api-template">
+
+    <Appenders>
+
+        <!-- Console appender (local/dev) -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="%-5p %d [%t] %X{correlationId} (%F:%L) - %m%n" />
+        </Console>
+
+        <!-- Rolling file appender -->
+        <RollingFile name="file"
+            fileName="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}mq-proc-api-template.log"
+            filePattern="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}mq-proc-api-template-%d{yyyy-MM-dd}-%i.log">
+            <PatternLayout pattern="%-5p %d [%t] %X{correlationId} (%F:%L) - %m%n" />
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+                <TimeBasedTriggeringPolicy />
+            </Policies>
+            <DefaultRolloverStrategy max="10" />
+        </RollingFile>
+
+        <!-- DataDog JSON appender — structured logs for Datadog Log Management -->
+        <Socket name="datadog" host="${sys:datadog.host:- }" port="${sys:datadog.port:-10516}"
+            connectTimeoutMillis="10000" reconnectionDelayMillis="5000">
+            <JsonTemplateLayout eventTemplateUri="classpath:DatadogMdcLayout.json" />
+        </Socket>
+
+    </Appenders>
+
+    <Loggers>
+
+        <!-- Category 1: General/info-level logs (Without Payload operations) -->
+        <AsyncLogger name="com.insulet.general" level="INFO" additivity="false">
+            <AppenderRef ref="Console" />
+            <AppenderRef ref="file" />
+            <AppenderRef ref="datadog" />
+        </AsyncLogger>
+
+        <!-- Category 2: Encrypted-payload logs (DEBUG — never raw, always encrypted) -->
+        <AsyncLogger name="com.insulet.payload" level="DEBUG" additivity="false">
+            <AppenderRef ref="Console" />
+            <AppenderRef ref="file" />
+            <AppenderRef ref="datadog" />
+        </AsyncLogger>
+
+        <!-- Category 3: DataDog structured JSON appender category -->
+        <AsyncLogger name="com.insulet.datadog" level="INFO" additivity="false">
+            <AppenderRef ref="Console" />
+            <AppenderRef ref="file" />
+            <AppenderRef ref="datadog" />
+        </AsyncLogger>
+
+        <!-- Suppress noisy MuleSoft framework loggers -->
+        <AsyncLogger name="org.mule.runtime.core.internal.processor.LoggerMessageProcessor"
+            level="OFF" additivity="false" />
+
+        <!-- Root logger -->
+        <AsyncRoot level="WARN">
+            <AppenderRef ref="Console" />
+            <AppenderRef ref="file" />
+        </AsyncRoot>
+
+    </Loggers>
+
+</Configuration>

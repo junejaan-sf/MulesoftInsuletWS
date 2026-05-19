@@ -1,0 +1,14 @@
+{
+  "data": {
+    "payload": {
+      "SomeField__c": "replace-with-field-value",
+      "AnotherField__c": "replace-with-field-value"
+    },
+    "event": {
+      "replayId": 67890,
+      "createdDate": "2026-01-15T10:30:00.000Z",
+      "type": "created"
+    }
+  },
+  "channel": "/event/<replace-with-streaming-channel-name>"
+}

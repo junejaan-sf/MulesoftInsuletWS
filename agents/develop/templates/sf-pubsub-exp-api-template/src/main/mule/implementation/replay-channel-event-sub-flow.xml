@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	    PATTERN B — Replay Channel Event Sub-Flow
+	    Called by: sfl-replay-channel-event-listener-flow
+	    Connector: mule-salesforce-connector (Streaming / CometD)
+
+	    No Object Store required — replayId is managed automatically
+	    by the Replay Channel Listener using FROM_LAST_REPLAY_ID.
+
+	    Payload shape (Streaming CometD nested format):
+	      payload.data.event.replayId  — nested replay identifier
+	      payload.data.payload.*       — event-specific fields (replace p-mq-publish-payload.dwl)
+	      payload.channel              — streaming channel name
+	-->
+	<sub-flow name="replay-channel-event-sub-flow" doc:name="replay-channel-event-sub-flow">
+
+		<!-- LOG FLOW_START: replayId is nested under payload.data.event.replayId -->
+		<module-logger:build-log-without-payload
+			doc:name="Log Start"
+			config-ref="custom-logger-connector_config"
+			message="Received Replay Channel event"
+			tracepoint="FLOW_START"
+			sourceSystem="#[Mule::p('sourceSystem')]"
+			targetSystem="#[Mule::p('targetSystem')]"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": payload.data.event.replayId default "No replayId received in payload"
+}]' />
+
+		<!-- LOG received event body (encrypted) -->
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="Log Received Event"
+			config-ref="custom-logger-connector_config"
+			message="Received Replay Channel event"
+			sourceSystem="#[Mule::p('sourceSystem')]"
+			targetSystem="#[Mule::p('targetSystem')]"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": payload.data.event.replayId default "No replayId received in payload"
+}]' />
+
+		<!--
+		    Transform:
+		      payload          → p-mq-publish-payload.dwl  (replace with real business mapping)
+		      requestContext   → v-request-context.dwl      (sourceSystem, targetSystem, replayId)
+		      mqProperties     → v-mq-properties.dwl        (MQ user-properties header map)
+		      originalPayload  → preserved for DLQ fallback if needed in error handler
+		-->
+		<ee:transform doc:name="Transform Incoming Event">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-mq-publish-payload.dwl" />
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+				<ee:set-variable resource="dwls/v-mq-properties.dwl" variableName="mqProperties" />
+				<ee:set-variable variableName="originalPayload"><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+		<!-- Publish transformed event to primary MQ queue -->
+		<flow-ref doc:name="Publish to MQ" name="mq-publish-sub-flow" />
+
+		<!-- LOG FLOW_END — no Object Store update needed for Pattern B -->
+		<module-logger:build-log-without-payload
+			doc:name="Log Exit"
+			config-ref="custom-logger-connector_config"
+			message="Replay Channel event published to MQ"
+			tracepoint="FLOW_END"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": payload.data.event.replayId default "No replayId received in payload"
+}]'
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+
+	</sub-flow>
+
+</mule>

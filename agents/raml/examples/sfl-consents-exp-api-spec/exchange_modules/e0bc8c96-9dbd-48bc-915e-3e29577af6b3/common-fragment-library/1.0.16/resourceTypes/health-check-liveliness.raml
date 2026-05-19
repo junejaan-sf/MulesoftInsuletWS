@@ -1,0 +1,13 @@
+#%RAML 1.0 ResourceType
+
+displayName: Liveness probe - Health Check w/o dependecies
+get:
+  displayName: Health Check (w/o dependencies)
+  description: Returns the status of the API (w/o dependencies)
+  responses:
+    200:
+      body:
+        application/json:
+          type: !include ../dataTypes/liveliness-probe-type.raml
+          examples: !include ../examples/health-check/liveness-probe-example-response.raml
+

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:tracing="http://www.mulesoft.org/schema/mule/tracing"
+	xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+http://www.mulesoft.org/schema/mule/tracing http://www.mulesoft.org/schema/mule/tracing/current/mule-tracing.xsd">
+
+	<!-- =========================================================
+	     HTTP Listener + APIKit Router
+	     Exposes /ping and /health-check endpoints.
+	     ========================================================= -->
+	<flow name="mq-proc-api-template-main" doc:name="mq-proc-api-template-main">
+		<http:listener config-ref="global-httpListener_config" path="${http.basePath}" doc:name="HTTP Listener">
+			<http:response statusCode="#[vars.httpStatus default 200]">
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:response>
+			<http:error-response statusCode="#[vars.httpStatus default 500]">
+				<http:body><![CDATA[#[payload]]]></http:body>
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:error-response>
+		</http:listener>
+		<ee:transform doc:name="Request Context">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/p-initial-vars.dwl" variableName="requestContext" />
+			</ee:variables>
+		</ee:transform>
+		<apikit:router config-ref="mq-proc-api-template-spec-config" doc:name="APIkit Router" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+	<!-- =========================================================
+	     Ping (Liveness) Endpoint
+	     GET /ping — no outbound dependency, returns alive status.
+	     ========================================================= -->
+	<flow name="get:\ping:mq-proc-api-template-spec-config" doc:name="get:\ping">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="GET /ping"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<ee:transform doc:name="DW Set Liveness Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-liveness-response.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="GET /ping"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     Health Check (Readiness) Endpoint
+	     GET /health-check — scatter-gather to all downstream dependencies.
+	     ========================================================= -->
+	<flow name="get:\health-check:mq-proc-api-template-spec-config" doc:name="get:\health-check">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="GET /health-check"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref doc:name="Flow Reference to health-check-ready-sub-flow" name="health-check-ready-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="GET /health-check"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     MQ Consumer Flow
+	     Subscribes to ${mq.queueName} with MANUAL ack.
+	     Circuit breaker is referenced by name from global-config.xml.
+	     maxConcurrency=1 prevents interleaved MANUAL-ack messages.
+	     ========================================================= -->
+	<flow name="mq-consumer-flow" doc:name="mq-consumer-flow" maxConcurrency="1">
+		<anypoint-mq:subscriber
+			config-ref="anypoint-mq_config"
+			destination="${mq.queueName}"
+			acknowledgementMode="MANUAL"
+			doc:name="Subscribe to MQ Queue"
+			circuitBreaker="mq_circuit_breaker_config">
+			<reconnect frequency="${mq.reconnection.frequency}" count="${mq.reconnection.attempts}" />
+			<anypoint-mq:subscriber-type>
+				<anypoint-mq:prefetch maxLocalMessages="${mq.maxLocalMessages}" />
+			</anypoint-mq:subscriber-type>
+		</anypoint-mq:subscriber>
+		<flow-ref doc:name="Flow Reference to mq-consumer-sub-flow" name="mq-consumer-sub-flow" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+</mule>

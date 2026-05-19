@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+		Core orchestration sub-flow — PUT /providers/records/{id}.
+		Demonstrates the standard proc-API pattern:
+		  Step 1  — Call primary SAPI, store response in target variable
+		  Step 2  — Extract key identifiers from primary SAPI response
+		  Step 3  — Scatter-gather: two parallel optional routes, each guarded by choice
+		  Final   — Build success response
+
+		When scaffolding a real proc API:
+		  - Rename this file and the sub-flow name to match your operation
+		    (e.g., update-provider-account-sub-flow.xml)
+		  - Replace "primary-sapi" with your primary downstream SAPI name
+		  - Replace "secondary-operation-sub-flow" and "tertiary-operation-sub-flow"
+		    with your actual optional operation sub-flows
+		  - Replace optional field guards (optionalItems, campaignName) with
+		    the actual fields that control each scatter-gather route
+	-->
+	<sub-flow name="update-record-sub-flow" doc:name="update-record-sub-flow">
+
+		<!-- Step 1: Call primary SAPI for the core business operation -->
+		<ee:transform doc:name="FV Set Target API Params for update-record">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-update-record-params.dwl" variableName="targetApiParams" />
+			</ee:variables>
+		</ee:transform>
+		<module-logger:build-log-with-encrypted-payload doc:name="LOG BEFORE REQUEST - update-record"
+			config-ref="custom-logger-connector_config"
+			message="PUT primary-sapi update-record"
+			tracepoint="BEFORE_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.targetApiParams.requestPayload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+		<!--
+			target= stores the response in vars.primarySapiResponse without overwriting payload.
+			The doc:name is used to identify this specific flow-ref in MUnit mocks — keep it unique.
+		-->
+		<flow-ref name="common-http-request-flow"
+			doc:name="common-http-request-flow (primary-sapi PUT /providers/records)"
+			target="primarySapiResponse" />
+		<module-logger:build-log-with-encrypted-payload doc:name="LOG AFTER REQUEST - update-record"
+			config-ref="custom-logger-connector_config"
+			message="Response from primary-sapi update-record"
+			tracepoint="AFTER_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.primarySapiResponse default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<!-- Step 2: Extract key identifiers from primary SAPI response -->
+		<ee:transform doc:name="Extract key fields from primary SAPI response">
+			<ee:message />
+			<ee:variables>
+				<!--
+					Replace "recordId" with the actual primary identifier returned by your SAPI
+					(e.g., accountId, leadId). This variable is used in the response DWL and the
+					transaction-error params DWL.
+				-->
+				<ee:set-variable variableName="recordId"><![CDATA[%dw 2.0
+output application/java
+---
+vars.primarySapiResponse.recordId default vars.requestContext.uriParams.id default ""]]></ee:set-variable>
+				<!--
+					Replace "secondaryId" with the identifier needed by scatter-gather Route A.
+					This might come from the primary SAPI response or from the request payload.
+					Remove if your Route A does not require a secondary identifier.
+				-->
+				<ee:set-variable variableName="secondaryId"><![CDATA[%dw 2.0
+output application/java
+---
+vars.requestContext.originalPayload.secondaryId default ""]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+		<!-- Step 3: Scatter-gather — parallel optional downstream calls -->
+		<scatter-gather doc:name="Parallel optional downstream calls">
+			<route>
+				<!--
+					Route A: Optional secondary SAPI call.
+					Guarded by: optionalItems (e.g., consents, entitlements) must be
+					non-empty AND secondaryId must be present.
+
+					Replace "optionalItems" and "secondaryId" with actual field names.
+					Replace "secondary-operation-sub-flow" with your sub-flow name.
+				-->
+				<choice doc:name="optionalItems Present?">
+					<when expression="#[!isEmpty(vars.requestContext.originalPayload.optionalItems default []) and !isEmpty(vars.secondaryId default '')]">
+						<flow-ref name="secondary-operation-sub-flow" doc:name="secondary-operation-sub-flow" />
+					</when>
+					<otherwise>
+						<module-logger:build-log-without-payload doc:name="LOG Skip Route A - Reason"
+							config-ref="custom-logger-connector_config"
+							message="Skipping secondary-operation"
+							sourceSystem="#[vars.requestContext.sourceSystem]"
+							targetSystem="#[vars.requestContext.targetSystem]"
+							entityDetails="#[output application/json --- { reason: if (isEmpty(vars.requestContext.originalPayload.optionalItems default [])) 'optionalItems is null or empty in request payload' else 'secondaryId is null or empty' }]" />
+					</otherwise>
+				</choice>
+			</route>
+			<route>
+				<!--
+					Route B: Optional tertiary SAPI call.
+					Guarded by: campaignName must be non-empty AND recordId must be present.
+
+					Replace "campaignName" and "recordId" with actual field names.
+					Replace "tertiary-operation-sub-flow" with your sub-flow name.
+				-->
+				<choice doc:name="campaignName Present?">
+					<when expression="#[!isEmpty(vars.requestContext.originalPayload.campaignName default '') and !isEmpty(vars.recordId default '')]">
+						<flow-ref name="tertiary-operation-sub-flow" doc:name="tertiary-operation-sub-flow" />
+					</when>
+					<otherwise>
+						<module-logger:build-log-without-payload doc:name="LOG Skip Route B - Reason"
+							config-ref="custom-logger-connector_config"
+							message="Skipping tertiary-operation"
+							sourceSystem="#[vars.requestContext.sourceSystem]"
+							targetSystem="#[vars.requestContext.targetSystem]"
+							entityDetails="#[output application/json --- { reason: if (isEmpty(vars.requestContext.originalPayload.campaignName default '')) 'campaignName is null or empty in request payload' else 'recordId could not be resolved' }]" />
+					</otherwise>
+				</choice>
+			</route>
+		</scatter-gather>
+
+		<!-- Final: Build success response -->
+		<ee:transform doc:name="DW Set update-record Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-update-record-response.dwl" />
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable variableName="httpStatus"><![CDATA[200]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+	</sub-flow>
+
+</mule>

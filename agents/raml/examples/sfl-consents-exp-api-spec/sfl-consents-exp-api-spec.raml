@@ -1,0 +1,31 @@
+#%RAML 1.0
+title: SFL Consents Experience API
+description: Experience API that listens to Salesforce DoubleOptIn platform events, extracts the patient phone number, and publishes it as a mobileNumbers array to Anypoint MQ for downstream SMS Double Opt-In processing via Marketing Cloud.
+version: v1
+mediaType: application/json
+baseUri: https://api.example.com/sfl-consents-exp-api/api/{version}
+
+uses:
+  CommonLib: exchange_modules/e0bc8c96-9dbd-48bc-915e-3e29577af6b3/common-fragment-library/1.0.16/common-fragment-library.raml
+
+securedBy:
+  - CommonLib.client-id-scheme
+
+types:
+  DoubleOptInMqPayload: !include dataTypes/DoubleOptInMqPayload.raml
+
+/ping:
+  get:
+  is:
+    - CommonLib.common-error-handler
+    - CommonLib.common-headers
+  type:
+    CommonLib.liveliness-probe:
+
+/health-check:
+  get:
+  is:
+    - CommonLib.common-error-handler
+    - CommonLib.common-headers
+  type:
+    CommonLib.readiness-probe:

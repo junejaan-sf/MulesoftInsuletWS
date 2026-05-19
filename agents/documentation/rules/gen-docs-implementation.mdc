@@ -1,0 +1,542 @@
+---
+description: Comprehensive guide for generating Confluence-ready HTML + Word documentation for any Mule 4 API project. Read this when the user asks to document, write up, or generate docs for a Mule project.
+globs: ["**/*.html", "**/*.docx", "**/*.md"]
+alwaysApply: false
+---
+
+# Mule API Documentation Generation Ruleset
+
+**Role:** You are a Senior Technical Writer and Software Architect.
+**Objective:** Produce a single, professional, Confluence-compatible HTML document (plus a Word `.docx` fallback) that explains a target Mule 4 API project to developers and on-call engineers, using the conventions captured below.
+
+---
+
+## 0. Pre-Generation Q&A (STOP & ASK)
+
+Before generating any artefact, ask the user the following. Do not assume defaults silently.
+
+| Question | Default if user defers | Notes |
+|----------|------------------------|-------|
+| **Project path** (absolute path or repo URL) | none — must be supplied | Used as the analysis target. |
+| **Output folder** | `<project-parent>/<project>-documentation/` | Create the folder if it does not exist. |
+| **Audience tone** | developer-friendly, technical | Alt: business-focused, mixed. |
+| **Section selection** | offer the canonical skeleton in §2 | User may include / exclude / rename any section. |
+| **Domain-specific source docs** | none | Optional path(s) to a Word/PDF whose realistic examples should be embedded below the relevant composite-request tables. |
+| **Diagram width** for raster output | `1800` px | Higher widths increase PNG size linearly. |
+| **Inbound payload alias** | inferred (e.g., `ASPN`) | Used to prefix `Value Passed` cells (see §4). |
+
+The agent **must wait for the user's answers** before any file is written.
+
+---
+
+## 1. Read-Only Project Analysis
+
+Inventory the project; do **not** modify it. Capture:
+
+- **`pom.xml`** → API name, layer (`sys` / `proc` / `exp`), version, parent POM (`mule-common-pom`).
+- **`src/main/resources/api/*.raml`** → endpoints, traits, types, examples.
+- **`src/main/mule/{api-spec}.xml`** and **`src/main/mule/implementation/*.xml`** → flows, sub-flows, scatter-gather routes, composite calls, error handlers.
+- **`src/main/mule/common/global-config.xml`** → external connectors and their reconnection settings.
+- **`src/main/resources/dwls/*.dwl`** → mapping logic. Use the contents to derive the "Value Passed" column, but **never name the .dwl file** in prose.
+- **`src/main/resources/properties/config.properties` and `config-{env}.properties`** → real values for every `${...}` token used elsewhere.
+- **`src/main/resources/errors/*`** → error catalogue (error codes / HTTP statuses / messages).
+- **`src/test/munit/**`** → suite count and any reported coverage.
+
+If a referenced project file is missing, note the gap — do not invent content.
+
+---
+
+## 2. Canonical Section Skeleton
+
+Offer this list verbatim to the user; let them tick / untick / rename. Do not write any HTML until the final list is confirmed.
+
+```
+1. Application Overview
+2. Non-Functional Requirements
+3. High-Level Architecture          (single end-to-end flow diagram)
+4. Interface Specifications
+   4.1 GET /api/v1/ping
+   4.2 GET /api/v1/health-check
+   4.3 {Primary entry point}        (REST resource OR MQ subscriber)
+       4.3.1 Input
+       4.3.2 Backend Mapping & Logic
+       4.3.3 Output / Acknowledgement
+5. MUnit Coverage                   (left empty unless user provides figures)
+```
+
+Per-section guidance:
+
+- **§1 Application Overview** — render exactly **one** two-column key/value table (no extra prose, no second table, no bullet list above or below it) using the canonical schema in §4.0. Populate every row from the project artefacts (`pom.xml`, RAML, `global-config.xml`, properties, Exchange/Anypoint metadata, etc.). If a value is genuinely unavailable, leave the cell blank rather than inventing one — do **not** drop the row. Take reference of the "Application Overview" tables in the documents under the `SampleConfluenceDocuments` folder.
+- **§2 Non-Functional Requirements** — render exactly **one** two-column table (`Type` / `Description`) with the canonical 5 rows defined in §4.9: Authentication, Response Time, Number of transactions to be processed, Spike Control, Rate-Limiting SLA. No additional rows, no extra columns, no second table, no bullet list above or below. Take reference of the "Non-Functional Requirements" tables in the documents under the `SampleConfluenceDocuments` folder.
+- **§3 High-Level Architecture** — exactly one chronological flow diagram. The first block is the entry point (e.g., `Message Consumed` for an MQ-driven API or `HTTP Request Received` for REST). Number every block sequentially (`Step 0`, `Step 1`, …) and propagate that numbering into §4.3.2 headings and prose (see §3 numbering rule). Do not mention as-is names for variables/ sub-flows and dwl files in the diagram blocks. **All arrows must be drawn as straight orthogonal segments** (purely horizontal and/or vertical paths) — no diagonals, no Bezier curves. Arrows must not overlap any block, and **every edge label must stay readable**: place a white background `<rect>` behind each label so it never overlaps shapes or other arrows. The error-branch arrow that points to the global error handler must originate from the **border of the Mule application group/block** (the dashed group rectangle that wraps the steps), not from any individual step's edge — see §3.4.4. Each block must contain exactly **one** bold title line — no subtext, no second descriptive line, no parentheticals (see §3.4). Title blocks using only words present in the project's code, RAML, properties, or config — never invent descriptive phrasing that is not grounded in the project. Do not create blocks for cross-cutting concerns such as request-context capture or entry/exit logging — describe those in §4.3.2 prose instead (see §3.4).
+- **§4.1 / §4.2** — show the actual JSON response samples taken from the project (do not invent fields). Mark `status` values clearly.
+- **§4.3.1 Input** — see §4 input-table rules. Read the embedded RAML file thoroughly for generating th input fields, whether they are (mandatory/optional) and their datatypes.
+- **§4.3.2 Backend Mapping & Logic** — one sub-section per primary processing step. For each API call/ Salesforce composite call, use the composite-request table format from §4. Embed a small sub-flow diagram per scatter-gather route or per branching decision, if there is enough information to create diagram else skip it.
+- **§4.3.3 Output / Acknowledgement** — describe success vs error responses, MQ ACK / NACK semantics, DLQ behaviour.
+- **§5 MUnit Coverage** — leave empty unless the user supplies figures or a Surefire report.
+
+---
+
+## 3. Diagram Standards
+
+### 3.1 SVG with embedded `<style>`
+
+Every inline `<svg>` must carry the canonical Atlassian-style palette as a `<style>` block **inside the SVG itself** (typically inside `<defs>`). Without this, `rsvg-convert` and Confluence both render shapes as solid black.
+
+```html
+<svg class="flow" viewBox="0 0 1240 1025" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="...">
+  <defs>
+    <marker id="arr3" .../>
+    <style>
+      .node{fill:#deebff;stroke:#0052cc;stroke-width:1.4}
+      .node-alt{fill:#fffae6;stroke:#ffab00;stroke-width:1.4}
+      .node-err{fill:#ffebe6;stroke:#de350b;stroke-width:1.4}
+      .node-ok{fill:#e3fcef;stroke:#36b37e;stroke-width:1.4}
+      .decision{fill:#fffae6;stroke:#ffab00;stroke-width:1.4}
+      .edge{stroke:#5e6c84;stroke-width:1.3;fill:none}
+      .edge-label{font-size:11px;fill:#5e6c84}
+      .group{fill:none;stroke:#5e6c84;stroke-dasharray:4 3;stroke-width:1}
+      .fork-bar{stroke:#0052cc;stroke-width:2.5;fill:none}
+      text{font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:12px;fill:#091e42}
+      .bold-label{font-weight:600}
+      .small-label{font-size:11px;fill:#5e6c84}
+    </style>
+  </defs>
+  ...
+</svg>
+```
+
+> Scope of `.small-label`: this style is reserved for legend swatches and free-floating edge labels (e.g., `on any error`). It must **not** be used as a second descriptive line inside a node — see §3.4.
+
+### 3.2 Numbering Consistency Rule
+
+Every Step / Route number that appears in the §3 main diagram **must match** the §4.3.2 sub-headings AND every prose reference. Apply renumbering atomically — never partially. When the §3 diagram changes (e.g., entry point becomes Step 0 instead of Step 1), shift:
+
+1. SVG `<text>` labels in the main diagram
+2. SVG labels in every sub-diagram
+3. `<h4>` / `<h5>` headings in §4.3.2
+4. Inline prose references (`Step 2 captures …`, `Routes 4.1 & 4.2 run concurrently …`)
+5. SVG XML comments (`<!-- Step N -->`)
+
+### 3.3 Confluence-Variant Rasterization
+
+Confluence's storage format strips raw `<svg>` markup. For the Confluence variant:
+
+- Render each SVG to PNG with `rsvg-convert -w {width} -f png input.svg > out.png`.
+- Base64-encode the PNG and embed as `<img alt="..." src="data:image/png;base64,...">`.
+- Preserve the SVG `aria-label` as the `<img alt>` so the variant's images can be correlated back to the source.
+
+If `rsvg-convert` is unavailable, fall back to `chromium --headless --screenshot` or ImageMagick `convert`, but warn the user that font rendering may differ.
+
+### 3.4 Block Content Rules
+
+These rules govern what goes **inside** each diagram block (and what does not). They apply to the §3 main flow diagram and to every sub-diagram embedded under §4.3.2.
+
+#### 3.4.1 No subtext in blocks
+
+Each block must contain **exactly one** text element — the bold title line. Do not stack a second descriptive `<text>` element under the title. Concretely:
+
+- Do not emit two `<text>` siblings inside a single rect (one with `class="bold-label"` and another with `class="small-label"`).
+- The bold-label must be vertically centered in the rect (e.g., for a 60 px tall rect at `y=Y`, set the text `y` to `Y + 35`).
+- Reserve `.small-label` for legend swatches and free-floating edge labels (`on any error`, etc.) only — see §3.1.
+
+<good-example>
+```html
+<rect class="node" x="220" y="170" width="280" height="60" rx="6"/>
+<text x="360" y="205" text-anchor="middle" class="bold-label">Step 0 — HTTP Request Received</text>
+```
+</good-example>
+
+<bad-example>Two stacked text lines inside a single block — forbidden.
+
+```html
+<rect class="node" x="220" y="170" width="280" height="60" rx="6"/>
+<text x="360" y="195" text-anchor="middle" class="bold-label">Step 0 — HTTP Request Received</text>
+<text x="360" y="213" text-anchor="middle" class="small-label">HTTP Listener on port 8081, basePath /api/v1/*</text>
+```
+</bad-example>
+
+#### 3.4.2 No invented words in block titles
+
+Every word inside a block title must be grounded in the project artefacts — the RAML (resource paths, display names, descriptions), the Mule XML (flow / sub-flow names, processor `doc:name` where they describe behaviour rather than tooling defaults), the properties files, the README, or industry-standard verbs already used elsewhere in the canonical document (`Transform`, `Publish`, `Validate`, `Route`, `Build Response`, `Return`, `Log`).
+
+- Do not coin marketing-style phrasing or invented domain names that are not in the project.
+- When the project's own naming is too low-level for the title, prefer a short verb-phrase grounded in the operation (`Publish to FIFO MQ Queue`) over a fabricated label (`Asynchronously Hand Off Patient Event for Salesforce Sync`).
+- Do not include implementation symbol names in the title (no `.dwl` filenames, no `xxx-sub-flow` parentheticals — see §4.4) but do anchor the wording in the project's vocabulary.
+
+#### 3.4.3 No blocks for cross-cutting concerns
+
+The following are cross-cutting concerns that exist in nearly every Insulet Mule API. They must **not** appear as numbered blocks in the §3 diagram (or in any §4.3.2 sub-diagram):
+
+- **Request-context capture** — the variable that snapshots inbound HTTP attributes / original payload / source-target system labels at the start of a request.
+- **Entry / exit logging** — the standard INFO-level "without payload" log lines emitted at the beginning and end of each flow.
+- **Correlation-ID propagation** — Mule already generates `correlationId` per event.
+- **Auto-discovery / API Manager policy enforcement** — happens at the gateway, not inside the flow.
+
+Document these once in a short prefatory paragraph at the top of §4.3.2 (or fold them into the relevant existing step's prose) so the information is preserved without polluting the diagram. Numbered blocks must be reserved for primary processing steps that change behaviour or call external systems.
+
+<good-example>§4.3.2 prefatory paragraph that captures the cross-cutting concerns as prose, leaving the diagram clean:
+
+> Two cross-cutting concerns surround every step below and are intentionally omitted from the architecture diagram for clarity:
+>
+> - **Request-context variable.** Immediately after the HTTP listener fires, the application captures a `requestContext` variable holding the inbound HTTP attributes, the original payload, and the resolved `sourceSystem` / `targetSystem` labels. This variable is referenced by every downstream logger and by the global error handler.
+> - **Standard logging.** Each request is bookended by an INFO-level "without payload" log line on entry and a matching exit log line with `tracepoint = FLOW_END`. No payload data is logged at INFO level.
+</good-example>
+
+#### 3.4.4 Error-branch arrow placement
+
+When the §3 diagram has a global error handler branch, the arrow connecting the happy path to the error path must originate from the **border of the Mule application group/block** (the dashed `<rect class="group">` that wraps the chronological steps) — not from any individual step's edge and not from a gap between two blocks. Originating the arrow on the application border visually communicates that **any** step inside the application can trigger the global error handler.
+
+The error edge itself must be a **straight, orthogonal path** — purely horizontal and/or vertical segments. Do not use diagonal lines or curved Bezier paths. The accompanying `on any error` label must be made readable by placing a white background `<rect>` behind it so it never overlaps a block or another arrow.
+
+<good-example>Arrow leaves the bottom edge of the application group rectangle and runs straight down to the global error handler block, with a white background behind the label so it stays readable.
+
+```html
+<!-- Application group rectangle (dashed) wrapping all happy-path steps -->
+<rect class="group" x="120" y="80" width="640" height="540" rx="10"/>
+
+<!-- Error edge: straight vertical path originating from the bottom border of the group at (440, 620) -->
+<path class="edge-err" d="M440,620 L440,720" marker-end="url(#arr3)"/>
+
+<!-- Label sits over the arrow with a white background rect behind it so it doesn't overlap shapes -->
+<rect class="edge-label-bg" x="395" y="660" width="90" height="16" fill="#ffffff"/>
+<text x="440" y="672" text-anchor="middle" class="edge-label" fill="#de350b">on any error</text>
+```
+</good-example>
+
+<bad-example>Arrow originating from a specific step's edge (or from a curved diagonal) implies only that one step can trigger the error handler, and the curved path is harder to read.
+
+```html
+<path class="edge-err" d="M500,640 C620,640 700,300 800,300" marker-end="url(#arr3)"/>
+<text x="600" y="365" class="edge-label" fill="#de350b">on any error</text>
+```
+</bad-example>
+
+The error branch must also **not** loop back to the happy path or to the caller — it terminates inside its own group at the final error step.
+
+---
+
+## 4. Content Standards
+
+These are the lessons learnt across the documentation iterations. Apply all of them.
+
+### 4.0 Application Overview Table (§1)
+
+The §1 Application Overview is a single, full-width, two-column key/value table that acts as the at-a-glance project metadata sheet. Every Mule API document — regardless of layer (`exp` / `proc` / `sys`) — must use the same row schema, in the same order, so readers can scan across projects consistently.
+
+#### 4.0.1 Column definition
+
+| Column | Header | Description |
+|--------|--------|-------------|
+| 1 | `Title` | The metadata field name. Render verbatim from the schema below. |
+| 2 | `Description` | The resolved value for this project. Leave blank if truly unknown — never invent. |
+
+> Note: column header is `Title` / `Description` (not `Field` / `Value`) to match the existing Confluence Sample documents under SampleConfluenceDocuments folder.
+
+#### 4.0.2 Canonical row schema (preserve order)
+
+| # | Title | What to populate it with | Source |
+|---|-------|--------------------------|--------|
+| 1 | Application Technical Name | The deployable artefactId, e.g., `drupal-exp-api`, `leads-proc-api`, `sfl-crm-persona-sys-api`. | `pom.xml` → `<artifactId>` |
+| 2 | Application Business Name | Human-readable name, e.g., `Drupal Experience API`, `Lead Process API`, `SF Leads System API`. | `pom.xml` → `<name>` or project README |
+| 3 | Business Domain | Domain area, e.g., `Persona Account`, `Person Domain`, `Order Management`. | Architecture/sprint docs |
+| 4 | Available Versions | Semver list, e.g., `1.0`, `1.0, 1.1`. | `pom.xml` → `<version>` + Exchange |
+| 5 | Purpose of API | One- or two-line summary of *what* the API does and *why*. | RAML root `description` / README |
+| 6 | Mule Application Type | `API` for REST, `Batch`, `Scheduler`, `MQ Consumer`, etc. | Project type |
+| 7 | API Type | `Experience` / `Process` / `System`. | Layer suffix in artefactId |
+| 8 | GitHub Repo URL | Full HTTPS URL to the repo. | Git remote / CI config |
+| 9 | Healthcheck Endpoints | Space- or bullet-separated list, e.g., `GET /health-check`, `GET /ping`. | RAML |
+| 10 | Exchange Specification URL | Anypoint Exchange asset URL. | Exchange |
+| 11 | Monitoring Dashboard URL | CloudHub/Anypoint Monitoring or Splunk/Datadog dashboard. | Ops runbook |
+| 12 | API Manager URL | Anypoint API Manager instance URL. | Anypoint Platform |
+| 13 | Runtime URLs | Public/CloudHub URLs per environment, one per line (`dev`, `qa`, `uat`, `prod`). | Deployment config |
+| 14 | Postman Collection File | Path or Confluence attachment name of the Postman collection. | `/postman/` folder or attachment |
+| 15 | Properties Configured | Comma- or line-separated list of files, e.g., `config.properties`, `config-dev.properties`, `config-qa.properties`, `config-uat.properties`, `config-prod.properties`. | `src/main/resources/properties/` |
+| 16 | Azure Vault Keys and Credentials Details | Names of secret keys consumed (do **not** print values), e.g., `client.id`, `client.secret`, `salesforce.password`. | `secure-properties` + Azure Key Vault names |
+| 17 | Depends on Mule Apps/APIs | Newline-separated list of downstream Mule apps/APIs invoked, e.g., `leads-proc-api`, `sfl-crm-sys-api`, `sfl-consents-sys-api`. | `global-config.xml` HTTP requests + RAML |
+| 18 | Insulet Connectors/Libraries Used | Bullet list of internal Insulet libs, e.g., `Common Error Handler`, `Notification Connector`, `Common Logger`. | `pom.xml` `<dependencies>` |
+| 19 | Other Libraries and Connectors Used | Third-party connectors, e.g., `HTTP Request Connector`, `Salesforce Connector`, `IBM MQ Connector`. | `pom.xml` `<dependencies>` |
+| 20 | API Manager Policies Applied | Comma-separated list, e.g., `Client ID Enforcement`, `JWT Validation`, `Rate Limiting`. | API Manager / `auto-discovery` |
+| 21 | Parent-POM | Parent POM coordinates, e.g., `mule-common-pom:1.x.x`. | `pom.xml` → `<parent>` |
+
+#### 4.0.3 Generic table template (drop into the canonical HTML)
+
+Render in the canonical HTML as a single full-width table (apply the §4.6 width rule). The template below is the **exact structure** to emit; replace the `{{ ... }}` placeholders with resolved values, and leave a cell empty (not `N/A`) when data is genuinely missing.
+
+```html
+<table style="width:100%">
+  <thead>
+    <tr><th style="width:30%">Title</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Application Technical Name</td><td>{{ artifactId }}</td></tr>
+    <tr><td>Application Business Name</td><td>{{ businessName }}</td></tr>
+    <tr><td>Business Domain</td><td>{{ businessDomain }}</td></tr>
+    <tr><td>Available Versions</td><td>{{ versions }}</td></tr>
+    <tr><td>Purpose of API</td><td>{{ purpose }}</td></tr>
+    <tr><td>Mule Application Type</td><td>{{ muleAppType }}</td></tr>
+    <tr><td>API Type</td><td>{{ apiType }}</td></tr>
+    <tr><td>GitHub Repo URL</td><td>{{ githubUrl }}</td></tr>
+    <tr><td>Healthcheck Endpoints</td><td>{{ healthcheckEndpoints }}</td></tr>
+    <tr><td>Exchange Specification URL</td><td>{{ exchangeUrl }}</td></tr>
+    <tr><td>Monitoring Dashboard URL</td><td>{{ monitoringUrl }}</td></tr>
+    <tr><td>API Manager URL</td><td>{{ apiManagerUrl }}</td></tr>
+    <tr><td>Runtime URLs</td><td>{{ runtimeUrls }}</td></tr>
+    <tr><td>Postman Collection File</td><td>{{ postmanCollection }}</td></tr>
+    <tr><td>Properties Configured</td><td>{{ propertiesFiles }}</td></tr>
+    <tr><td>Azure Vault Keys and Credentials Details</td><td>{{ vaultKeys }}</td></tr>
+    <tr><td>Depends on Mule Apps/APIs</td><td>{{ dependsOnApis }}</td></tr>
+    <tr><td>Insulet Connectors/Libraries Used</td><td>{{ insuletLibs }}</td></tr>
+    <tr><td>Other Libraries and Connectors Used</td><td>{{ otherLibs }}</td></tr>
+    <tr><td>API Manager Policies Applied</td><td>{{ apiPolicies }}</td></tr>
+    <tr><td>Parent-POM</td><td>{{ parentPom }}</td></tr>
+  </tbody>
+</table>
+```
+
+Equivalent Markdown form (for the `.docx`/Markdown variant):
+
+```markdown
+| Title | Description |
+|-------|-------------|
+| Application Technical Name | {{ artifactId }} |
+| Application Business Name | {{ businessName }} |
+| Business Domain | {{ businessDomain }} |
+| Available Versions | {{ versions }} |
+| Purpose of API | {{ purpose }} |
+| Mule Application Type | {{ muleAppType }} |
+| API Type | {{ apiType }} |
+| GitHub Repo URL | {{ githubUrl }} |
+| Healthcheck Endpoints | {{ healthcheckEndpoints }} |
+| Exchange Specification URL | {{ exchangeUrl }} |
+| Monitoring Dashboard URL | {{ monitoringUrl }} |
+| API Manager URL | {{ apiManagerUrl }} |
+| Runtime URLs | {{ runtimeUrls }} |
+| Postman Collection File | {{ postmanCollection }} |
+| Properties Configured | {{ propertiesFiles }} |
+| Azure Vault Keys and Credentials Details | {{ vaultKeys }} |
+| Depends on Mule Apps/APIs | {{ dependsOnApis }} |
+| Insulet Connectors/Libraries Used | {{ insuletLibs }} |
+| Other Libraries and Connectors Used | {{ otherLibs }} |
+| API Manager Policies Applied | {{ apiPolicies }} |
+| Parent-POM | {{ parentPom }} |
+```
+
+#### 4.0.4 Rules for this table
+
+- Emit **all 21 rows in the order shown** — do not reorder, do not drop rows even if the value is blank.
+- Cell content is plain text or a hyperlink — no bullet lists, no nested tables, no images.
+- Multi-value cells (e.g., dependent APIs, vault keys, runtime URLs) use `<br>` line breaks (HTML) or `<br/>` (Markdown HTML passthrough). Avoid commas-only when the list is longer than 3 items.
+- Never embed credential values, encryption keys, or any secret material in the `Description` cell — only the **key/property name**.
+- Hyperlinks (`<a href="...">`) are encouraged for GitHub, Exchange, API Manager, Monitoring, Runtime URLs.
+- Do **not** add a `Notes`, `Owner`, `Last-updated` or any extra column — keep the table strictly two columns.
+
+### 4.1 Input Tables (§4.3.1)
+
+- Columns: `Field`, `Type`, `Required?`, `Description`.
+- One row per field. **Never club** related fields into a single row.
+- Do not add a `Notes` column.
+
+### 4.2 Composite-Request Tables (§4.3.2)
+
+For every API call (for e.g. Salesforce composite call), render a 4-column table:
+
+| Field | Object | Type | Value Passed |
+|-------|--------|------|--------------|
+
+- `Field` — the Salesforce field API name (e.g., `FirstName`).
+- `Object` — the Salesforce object (e.g., `Account`, `MemberPlan__c`).
+- `Type` — Salesforce field type (`String`, `Date`, `Reference`, `Boolean`, …).
+- `Value Passed` — the source expression. **Prefix with the inbound alias** when the value comes from the request payload (e.g., `ASPN.PatientFirstName` if the alias is `ASPN`). Use literal constants in quotes (`"Insulet"`). Use `vars.<name>` only for derived intermediates. Do not mention as-is names for variables/ sub-flows and dwl files.
+
+If the user supplied a domain source doc (e.g., `ASPN Inbound System.docx`), embed the matching realistic JSON example **below** each composite-request table inside a `<pre><code>` block.
+
+Do **not** include any column based on `referenceId` / refId mapping unless the user explicitly asks.
+
+### 4.3 Property Substitution
+
+Replace every `${prop.name}` token with its real, resolved value:
+
+1. Look in `config.properties` first.
+2. If absent, fall back to `config-dev.properties` and append the qualifier `(value in config-dev.properties)` after the substituted value. Replace the environment value with {env}. For e.g. dev-aspn-patient-sfl-mq -> {env}-aspn-patient-sfl-mq
+3. If absent in both, leave the `${...}` token as-is and note it explicitly.
+
+Example: `{env}-aspn-patient-sfl-mq`.
+
+### 4.4 Forbidden Phrasings
+
+- **Never name `.dwl` files** in prose, headings, captions, or tables. Describe behaviour, not the implementation symbol.
+- **Never write `(sub-flow-name)` parentheticals** in headings (e.g., do not write "Step 4 — Account Upsert (account-cpa-objects-sub-flow)"). Drop the parenthetical.
+- **No emojis** unless the user explicitly asks for them.
+
+### 4.5 Code Blocks
+
+- Use `<pre><code>...</code></pre>` for every JSON / SOQL / shell snippet.
+- Indent JSON / SOQL bodies with **2 spaces** consistently.
+- Do not let the Word exporter "rich-text-ify" code blocks; preserve them as plain `<pre>` so Word renders a mono-spaced run.
+
+### 4.6 Tables
+
+- Tables must be full-width: apply `style="width:100%"` on every `<table>` (or use a CSS rule that targets `table` in the document `<style>` block).
+- Do not centre-align fixed-width tables.
+
+### 4.7 Tone
+
+- Developer-friendly, lucid, factual.
+- Prefer flow diagrams over walls of prose.
+- Avoid marketing language.
+- Keep paragraphs short (≤ 4 sentences).
+
+### 4.8 MUnit Section
+
+The §5 MUnit Coverage section must be left **empty** unless the user provides explicit coverage figures or a Surefire report. Do not invent percentages.
+
+### 4.9 Non-Functional Requirements Table (§2)
+
+The §2 Non-Functional Requirements is a single, full-width, two-column table that captures the API's runtime SLA contract. Every Mule API document — regardless of layer (`exp` / `proc` / `sys`) — must use the same row schema, in the same order, so on-call engineers can compare SLAs across projects consistently.
+
+#### 4.9.1 Column definition
+
+| Column | Header | Description |
+|--------|--------|-------------|
+| 1 | `Type` | The NFR field name. Render verbatim from the schema below. |
+| 2 | `Description` | The resolved value for this project. Use `TBC` only when the SLA is genuinely undecided — never invent. |
+
+> Note: column header is `Type` / `Description` (not `Field` / `Value`) to match the existing Confluence Sample documents under the `SampleConfluenceDocuments` folder.
+
+#### 4.9.2 Canonical row schema (preserve order, exactly 5 rows)
+
+| # | Type | What to populate it with | Source |
+|---|------|--------------------------|--------|
+| 1 | Authentication | The wire-level auth mechanism enforced by API Manager / RAML, e.g., `Client ID Enforcement`, `JWT Validation (on /token endpoint), Client ID Enforcement (on all other endpoints)`, `Variable, see resources for review auth mechanism for each endpoint implementation`. | API Manager policies + RAML `securedBy` |
+| 2 | Response Time | Percentile-based latency target, e.g., `95% within 60 seconds`, `99% within 2 seconds`. | NFR sheet / SRE runbook |
+| 3 | Number of transactions to be processed | Expected throughput (per minute / per day) or `TBC` when not yet sized. | Capacity-planning doc |
+| 4 | Spike Control | `Yes` / `No`. If `Yes`, append the policy name and threshold, e.g., `Yes — 100 req/sec burst`. | API Manager `spike-control` policy |
+| 5 | Rate-Limiting SLA | `Yes` / `No`. If `Yes`, append the limit, e.g., `Yes — 1000 req/min`. | API Manager `rate-limiting` policy |
+
+#### 4.9.3 Generic table template (drop into the canonical HTML)
+
+Render in the canonical HTML as a single full-width table (apply the §4.6 width rule). The template below is the **exact structure** to emit; replace the `{{ ... }}` placeholders with resolved values, and use `TBC` (not blank) when an SLA is still being negotiated.
+
+```html
+<table style="width:100%">
+  <thead>
+    <tr><th style="width:30%">Type</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Authentication</td><td>{{ authentication }}</td></tr>
+    <tr><td>Response Time</td><td>{{ responseTime }}</td></tr>
+    <tr><td>Number of transactions to be processed</td><td>{{ throughput }}</td></tr>
+    <tr><td>Spike Control</td><td>{{ spikeControl }}</td></tr>
+    <tr><td>Rate-Limiting SLA</td><td>{{ rateLimitingSla }}</td></tr>
+  </tbody>
+</table>
+```
+
+Equivalent Markdown form (for the `.docx`/Markdown variant):
+
+```markdown
+| Type | Description |
+|------|-------------|
+| Authentication | {{ authentication }} |
+| Response Time | {{ responseTime }} |
+| Number of transactions to be processed | {{ throughput }} |
+| Spike Control | {{ spikeControl }} |
+| Rate-Limiting SLA | {{ rateLimitingSla }} |
+```
+
+#### 4.9.4 Rules for this table
+
+- Emit **all 5 rows in the order shown** — do not reorder, do not drop rows even if the value is `TBC`.
+- Cell content is plain text — no bullet lists, no nested tables, no images, no hyperlinks.
+- `Spike Control` and `Rate-Limiting SLA` must be `Yes` or `No` (capitalised). When `Yes`, append the threshold after an em-dash, e.g., `Yes — 200 req/sec`.
+- For Experience APIs that expose multiple auth mechanisms (e.g., JWT on `/token`, Client ID elsewhere), list each scope on its own line in the `Authentication` cell, separated by `<br>`.
+- Do **not** add rows for Logging, Monitoring, Error-Handling, or Security beyond authentication — those belong in §1 (Application Overview) or in their own dedicated sections, not here.
+- Do **not** add a `Notes`, `Owner`, `Reviewed-on`, or any extra column — keep the table strictly two columns.
+
+---
+
+## 5. Output Format
+
+### 5.1 Build the Canonical HTML First
+
+Produce a single canonical HTML file with:
+- A document-level `<style>` block at the top (table styling, code-block styling, headings, palette).
+- Every diagram as **inline SVG** with the `<style>` block from §3.1 baked in.
+- A table of contents linking to each section anchor (`<h1 id="s1">`, `<h2 id="s2">`, `<h2 id="s41">`, …).
+
+### 5.2 Confluence Variant — `{project-name}-confluence.html`
+
+Derived from the canonical HTML by:
+1. Rasterising every SVG to a base64 PNG (§3.3) and replacing each `<svg>...</svg>` with `<img alt="..." src="data:image/png;base64,...">`.
+2. Keeping all other markup intact.
+
+This single file is what the user will import into Confluence.
+
+### 5.3 Word Variant — `{project-name}.docx`
+
+Derived from the canonical HTML by running it through Pandoc (preferred):
+
+```bash
+pandoc {project-name}.html -o {project-name}.docx \
+  --reference-doc=reference.docx --highlight-style=tango
+```
+
+Constraints:
+- Code blocks must remain `<pre>` elements pre-Pandoc so the resulting `.docx` shows them as a mono-spaced block (Word otherwise turns them into rich text and breaks indentation).
+- Diagrams should already be rasterised PNG `<img>` tags before passing to Pandoc — Word does not handle inline SVG reliably.
+
+If Pandoc is not available, use LibreOffice headless (`soffice --headless --convert-to docx`) or ask the user to install Pandoc.
+
+### 5.4 File Naming and Location
+
+Place both files in the user's chosen output folder:
+
+```
+<output-folder>/
+├── {project-name}-confluence.html
+└── {project-name}.docx
+```
+
+Example: `~/Documents/patient-proc-documentation/UpdatedDocumentation/patient-proc-api-confluence.html`.
+
+---
+
+## 6. User Hand-Off Snippet
+
+End every documentation run with this exact two-line message:
+
+> **Confluence variant** — in your Confluence space, open the target page, click **⋯ → Import HTML**, and choose `{project-name}-confluence.html`. Alternatively, paste the file's `<body>` contents into a fresh page using the Storage-format editor.
+>
+> **Word variant** — in your Confluence space, open the target page, click **⋯ → Import Word document**, and choose `{project-name}.docx`.
+
+---
+
+## 7. Execution Instruction for the Agent
+
+1. **Ask** all Section-0 questions and wait for the user's answers.
+2. **Read** the project per Section 1 (read-only sweep). Note any gaps.
+3. **Confirm** the Section-2 skeleton with the user — accept include / exclude / rename edits.
+4. **Build** the canonical HTML following Sections 3 and 4.
+5. **Produce** the Confluence HTML and the `.docx` per Section 5.
+6. **Write** both files into the chosen output folder.
+7. **Print** the Section-6 hand-off snippet.
+8. **Do not** include any other section related to Munits apart from the Munit coverage
+9. **Refer** the PDF documents in the 'SampleConfluenceDocuments' folder
+
+Do **not** commit the generated documentation to git unless the user explicitly asks.
+
+---
+
+## 8. References
+
+| Source | Purpose |
+|--------|---------|
+| `agents/documentation/rules/intent-gen-docs.mdc` | Keyword-triggered intent that dispatches here |
+| `agents/develop/rules/implementation-ruleset_v4.mdc` | Project-structure assumptions used by Section 1 analysis |
+| `agents/raml/rules/gen-raml-implementation.mdc` | Endpoint / data-type definitions consumed for §4 |
+| `agents/review/rules/review-mule-flow-naming.mdc` | Flow naming used in §4.3.2 prose |
+| `agents/review/rules/review-logging-standards.mdc` | Logger categories in §2 NFR section |
+| `agents/review/rules/review-error-handling.mdc` | Error-handler description used in §4.3.3 |
+| `agents/review/rules/review-properties-config.mdc` | Property-substitution rule (§4.3) |
+| `agents/review/rules/review-api-design-standards.mdc` | API naming and version |
