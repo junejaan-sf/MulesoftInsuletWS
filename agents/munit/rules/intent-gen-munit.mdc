@@ -24,3 +24,13 @@ When the user's request is about **generating**, **creating**, **scaffolding**, 
 - Test input/output JSON fixtures under `src/test/resources/`
 - DataWeave assertion scripts if needed
 - Mocks for all external connectors (HTTP, MQ, Database, Salesforce, etc.)
+
+## Handoff — After Generation
+
+After all test suite files have been written, suggest the next step to the user. Do **not** invoke it automatically:
+
+```
+MUnit generation complete. To validate the tests, run /use-build in a new chat.
+It will run mvn clean test with the Insulet canonical VM args and auto-fix any
+mock shape, namespace, or DataWeave compile errors it finds before escalating to you.
+```

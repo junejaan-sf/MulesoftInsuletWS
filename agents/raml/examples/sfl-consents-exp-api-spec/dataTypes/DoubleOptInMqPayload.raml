@@ -1,9 +1,0 @@
-#%RAML 1.0 DataType
-description: Message payload published to Anypoint MQ (<env>-sfl-doubleoptin-sfmc-mq) for downstream SMS Double Opt-In processing. Derived from the Salesforce DoubleOptIn platform event field Phone_Number_c.
-type: object
-properties:
-  mobileNumbers:
-    type: array
-    items: string
-    required: true
-    description: Single-element array containing the mobile phone number extracted from the Salesforce Phone_Number_c platform event field.

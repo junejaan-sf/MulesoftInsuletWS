@@ -11,6 +11,7 @@ Type any command in a Cursor chat to activate the corresponding agent.
 | `/use-raml-to-exchange` | RAML — from JIRA + publish to Exchange | Story ID in chat |
 | `/use-develop` | MuleSoft App Development | `project/input_develop/` |
 | `/use-munit` | MUnit Test Generation | `project/input_munit/` |
+| `/use-build` | Build Validator — mvn package + test, auto-fix | `project/output_develop/` |
 | `/use-postman` | Postman / Integration Testing | `project/input_postman/` |
 | `/use-docs` | Documentation | `project/input_docs/` |
 | `/use-review` | Code Review | — (point at project via @mention) |
@@ -28,7 +29,9 @@ Type any command in a Cursor chat to activate the corresponding agent.
 /use-notebooklm → extract design examples from NotebookLM notebook
 /use-raml       → review RAML output
 /use-develop    → review Mule app
+/use-build      → validate package build (mvn clean package, auto-fix)
 /use-munit      → review test suites
+/use-build      → validate test run (mvn clean test, auto-fix)
 /use-postman    → review collection
 /use-docs       → review documentation
 /use-review     → final quality gate

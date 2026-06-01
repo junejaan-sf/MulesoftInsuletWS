@@ -202,6 +202,7 @@ Each pattern is described with the same template (Trigger / Main Flow / Context 
 - `azure-key-vault-properties-provider_config` — Azure Key Vault properties provider
 - One or more `http-{target}-server_http-request_config` — `http:request-config` per downstream system (only when calling downstream)
 - `api-autodiscovery_config` — `api-gateway:autodiscovery`
+- `notification-connector_config` — `module-notification:config` (add when notification connector is used; see Section 11 for the required self-closing XML declaration and property keys)
 
 **Outbound calls:** Set `vars.targetApiParams` via DWL, then `flow-ref` to `{downstream-sys-api}-request-flow` (per-system named flow with static `config-ref`). See Section 9.
 
@@ -327,7 +328,7 @@ Each pattern is described with the same template (Trigger / Main Flow / Context 
 - `anypoint-mq_config` — Anypoint MQ connector with reconnection
 - `custom-logger-connector_config`
 - `azure-key-vault-properties-provider_config`
-- `notification-connector_config` (recommended — used by global error handler on DLQ failure)
+- `notification-connector_config` — `module-notification:config` (recommended; see Section 11 for the required self-closing XML declaration and property keys)
 - One or more `http-{target}-server_http-request_config` per downstream system
 
 **Outbound calls:** Same pattern as 3.1 — set `vars.targetApiParams` via DWL, then `flow-ref` to `{downstream-sys-api}-request-flow` (per-system named flow with static `config-ref`). See Section 9.
@@ -410,7 +411,7 @@ Use as the skeleton when the Jira story is event-driven and consumes from Anypoi
 - `custom-logger-connector_config`
 - `azure-key-vault-properties-provider_config`
 - One or more `http-{target}-server_http-request_config` per downstream system
-- `notification-connector_config` (recommended)
+- `notification-connector_config` — `module-notification:config` (recommended; see Section 11 for the required self-closing XML declaration and property keys)
 
 **Outbound calls:** Same pattern as 3.1 — set `vars.targetApiParams` via DWL, then `flow-ref` to `{downstream-sys-api}-request-flow` (per-system named flow with static `config-ref`). See Section 9.
 
@@ -1423,6 +1424,29 @@ var statusValue = if ((payload pluck (value, key, index) -> (value.payload defau
 - Use `module-notification:http-body` — JSON from `vars.notificationInputBody` (built by `v-notification-input-body.dwl`).
 - Use `module-notification:http-headers` — `x-correlation-id`, `client_id`, `client_secret` from properties.
 - Add `notification.api.clientId` and `notification.api.clientSecret` to required properties when notification is enabled.
+
+### Canonical `module-notification:config` declaration (`global-config.xml`)
+
+**CRITICAL:** The `<module-notification:config>` element **must be declared in `global-config.xml`**. Without this declaration the Mule runtime throws `IllegalArgumentException: There's no <module-notification:config> named [notification-connector_config]` at startup.
+
+**CRITICAL:** Do **NOT** add `host` or `basePath` as XML attributes on `<module-notification:config>`. Connector version `260ebaee:mule-notification-connector:1.0.1` resolves connection details from property placeholders via module defaults only. Adding them causes `cvc-complex-type.3.2.2` schema validation failures at deploy time.
+
+```xml
+<!-- global-config.xml — self-closing, NO host/basePath/port attributes.
+     Connection is resolved from property placeholders via module defaults.
+     Properties notification.api.host / .port / .basePath must be present
+     in every env-specific config file (e.g. config-dev.properties). -->
+<module-notification:config name="notification-connector_config" />
+```
+
+Required property keys (add to every env config file when notification is enabled):
+```properties
+notification.api.host=
+notification.api.port=443
+notification.api.basePath=/notifications
+notification.api.clientId=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+notification.api.clientSecret=${azure-key-vault-properties-provider::secret::<replace-proper-value>}
+```
 
 ### Canonical `send-notification-sub-flow` (embedded)
 

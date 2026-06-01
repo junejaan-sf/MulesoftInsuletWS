@@ -312,6 +312,37 @@ technical-outbound/
 
 ## Test Implementation Template
 
+### Test Suite File Header (REQUIRED — every test suite XML)
+
+Every test suite file MUST start with the following `<mule>` root element and `<munit:config>` declaration:
+
+```xml
+<mule xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core       http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit      http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+    <munit:config name="{operation}-test-suite.xml"/>
+
+    <!-- test cases follow -->
+</mule>
+```
+
+**CRITICAL — `munit:config name` must include the `.xml` extension:**
+- The `name` attribute MUST exactly match the physical file name including the `.xml` extension (e.g. `name="doubleoptin-mq-consumer-test-suite.xml"`).
+- MUnit 3.6.1 uses this value to locate the suite at runtime. If the extension is absent, the suite reports **0 tests found** and the build fails with `Build Failed: No tests were executed!`.
+
+**CRITICAL — Namespace ordering:**
+- `xmlns:xsi` MUST be declared first.
+- Only declare `xmlns:` namespaces for connectors that appear as **XML elements** in this file. Do NOT include namespaces (e.g. `xmlns:anypoint-mq`) that are only referenced as string values in `processor=` attributes — stale namespace + `schemaLocation` entries add unnecessary schema validation surface and can block deployment.
+
+---
+
 ### Standard Test Structure
 Every test MUST follow this structure:
 
@@ -1054,6 +1085,8 @@ src/test/resources/testdata/common/
 When implementing a new MUnit test, ensure:
 
 - [ ] Test suite file name follows pattern: `{operation}-test-suite.xml`
+- [ ] `munit:config name` includes the `.xml` extension and matches the physical file name exactly (e.g. `name="doubleoptin-mq-consumer-test-suite.xml"`)
+- [ ] Test suite file header uses correct namespace ordering (`xsi` first) with no unused `xmlns:` declarations
 - [ ] Test case names follow pattern: `{prefix}-{operation}-{scenario}-test-suite`
 - [ ] Testdata directory structure is created with all four folders
 - [ ] All testdata files use proper naming: `{operation}-{scenario}-{type}.{extension}`

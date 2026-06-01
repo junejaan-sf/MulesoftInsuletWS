@@ -1,0 +1,45 @@
+# ============================================================
+# Root-level: only .cursor/commands/, agents/, project/, README.md are kept
+# ============================================================
+.DS_Store
+.claude/
+.vscode/
+poc/
+regression-tooling/
+rules/
+
+# Secrets / MCP config — never commit
+mcp.json
+
+# Stray root-level files
+/*.mdc
+
+# .cursor — keep only commands/, ignore everything else inside
+.cursor/.DS_Store
+
+# ============================================================
+# Agent examples — local reference files, never committed
+# ============================================================
+agents/build/examples/
+agents/design/examples/
+agents/develop/examples/
+agents/documentation/examples/
+agents/munit/examples/
+agents/postman/examples/
+agents/raml/examples/
+agents/review/examples/
+
+# ============================================================
+# Project working folders — all input/output content is local-only
+# ============================================================
+project/input_develop/
+project/input_docs/
+project/input_munit/
+project/input_raml/
+project/output_build/
+project/output_develop/
+project/output_docs/
+project/output_munit/
+project/output_postman/
+project/output_raml/
+project/output_regression/
