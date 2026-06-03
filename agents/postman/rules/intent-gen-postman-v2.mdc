@@ -4,6 +4,7 @@ globs:
 alwaysApply: false
 ---
 
+
 # Postman Collection Generation Intent (v2)
 
 When the user's request is about **generating**, **creating**, **scaffolding**, or **building** a Postman collection for a MuleSoft API, use this intent to guide the process.

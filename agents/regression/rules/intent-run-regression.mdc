@@ -4,6 +4,7 @@ globs:
 alwaysApply: false
 ---
 
+
 # Intent: Run Regression Tests
 
 Trigger on any of these phrases (case-insensitive):

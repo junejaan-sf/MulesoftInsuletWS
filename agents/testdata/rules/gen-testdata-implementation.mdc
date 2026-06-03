@@ -1,0 +1,272 @@
+---
+description: Comprehensive Live Test Data Resolver implementation for MuleSoft Salesforce system APIs — discovers SObjects from app code, classifies payload fields by role, queries live valid records read-only via the Salesforce MCP, and writes a seed-payload artifact consumed by the Postman v2 generator
+globs: ["**/input_postman/*-seed-payloads.json"]
+alwaysApply: false
+---
+
+# Live Test Data Resolver — Implementation Guidelines
+
+You are a MuleSoft integration engineer. This rule specifies the complete algorithm for auto-deriving real Salesforce test data for Postman seed payloads. **Read this rule in full before executing any step.**
+
+## 1. Purpose and Context
+
+The Postman v2 generator (`gen-postman-implementation-v2.mdc` §6.5) needs a valid request body for every non-health POST/PUT endpoint so that Newman/Postman can fire real calls against a live Mule API. MUnit test fixtures use synthetic/mocked values; they are not valid for live runs. This resolver bridges that gap by:
+
+1. Reading each Mule app's Salesforce connector operations and DataWeave mapping files to discover which SObjects the endpoint touches and how each request-payload field maps to a Salesforce field.
+2. Querying live, valid records from the target org (read-only) via the `user-salesforce-dx` MCP.
+3. Writing a `project/input_postman/{api}-seed-payloads.json` artifact that the Postman agent picks up as its highest-priority seed (Tier 0), without changing MUnit fixtures.
+
+**This resolver is entirely object-agnostic.** Campaign/CampaignMember is just one concrete instance. The same algorithm works for Lead, Account, Case, Task, Contact, Opportunity, composite requests, custom `*__c` objects, or any combination.
+
+## 2. Inputs the Resolver Consumes
+
+| Source | What we extract | Where |
+|---|---|---|
+| RAML spec | Non-health endpoints, HTTP methods, request body schema, field names + types | §4.1 lookup chain (same as Postman agent) |
+| `src/main/mule/*.xml` | Flow names per endpoint, `flow-ref` chains, Salesforce connector operations (`salesforce:query`, `salesforce:create`, `salesforce:update`, `salesforce:upsert`, `salesforce:retrieve`, `salesforce:delete`, composite ops), `type` attribute per write op | Source flows |
+| `src/main/resources/properties/config.properties` + `config-dev.properties` | SOQL query strings (keys matching `query*`), SObject aliases (e.g. `sfl.campaignMember=CampaignMember`), system config | Properties files |
+| `src/main/resources/dwls/p-*-input.dwl` | Request-mapping DataWeave: how each payload field maps to an SObject field | Mapping DWLs |
+| `user-salesforce-dx` MCP `list_all_orgs` | Available SF CLI logins and their aliases | MCP |
+| `user-salesforce-dx` MCP `run_soql_query` | Live record Ids and field values (read-only) | MCP |
+
+## 3. Output Artifact Contract
+
+Write to: `project/input_postman/{api}-seed-payloads.json`
+
+```json
+{
+  "api": "{api-name}",
+  "org": "{sf-alias-used}",
+  "resolvedAt": "{ISO-8601-timestamp}",
+  "endpoints": {
+    "{METHOD} {path}": {
+      "happy": {
+        "body": "<JSON body — array or object matching RAML schema>"
+      },
+      "negative": {
+        "400": {
+          "body": "<JSON body that triggers a 400 — valid ids, deliberately-invalid key>",
+          "_note": "Deliberate trigger: <which field and why it fails>"
+        }
+      },
+      "_provenance": {
+        "<payloadField>": "<SObject.Field | derivation description | SOQL used>",
+        "_sfOperations": ["<SObject>:<operation>", "..."],
+        "_login": "<org-alias>"
+      }
+    }
+  }
+}
+```
+
+Only write endpoints that fully resolved. Omit any endpoint where a required field could not be resolved, and surface a chat note so the Postman §6.5 chain falls back to MUnit/RAML.
+
+## 4. Step-by-Step Resolution Algorithm
+
+### 4.1 Step 1 — Enumerate non-health endpoints from RAML
+
+Resolve the RAML using the same five-tier lookup chain as the Postman agent (`gen-postman-implementation-v2.mdc` §4.1). Collect all `(METHOD, path)` pairs that are NOT health endpoints (`/ping`, `/health-check`, `/health-check/ready`, `/health-check/live`). Only POST, PUT, and PATCH endpoints with a request body need seed-payload resolution. GET/DELETE endpoints that have only uri/query params but no request body are skipped — they have no body to seed.
+
+### 4.2 Step 2 — Discover SF operations per endpoint
+
+For each `(METHOD, path)` to resolve, locate its flow in `src/main/mule/*.xml`. APIKit-generated flow names follow the pattern `{METHOD}:\{path}:{api-spec-config}`. Follow every `flow-ref` transitively. In each reachable flow file, scan for Salesforce connector elements:
+
+**Query operations (lookup objects / read patterns):**
+```
+<salesforce:query ...>
+<salesforce:retrieve type="{SObject}" ...>
+```
+Read the SOQL string from the `<salesforce:salesforce-query>` body (or `payload` reference). Resolve `p('...')` property references from `config.properties`. The SOQL `FROM` clause names the SObject; the `WHERE` clause field names are the lookup keys.
+
+**Write operations (target SObject for the create/update):**
+```
+<salesforce:create type="{SObject}" ...>
+<salesforce:update type="{SObject}" ...>
+<salesforce:upsert type="{SObject}" externalIdFieldName="{field}" ...>
+<salesforce:delete type="{SObject}" ...>
+```
+The `type` attribute is the target SObject. Resolve `p('...')` property references (e.g. `p('sfl.campaignMember')` -> look up `sfl.campaignMember=CampaignMember` in `config.properties`).
+
+**Composite / bulk operations:**
+```
+<salesforce-composite:execute-composite-request ...>
+<salesforce:create-job ...>
+```
+Inspect the payload DWL building the composite request body to extract each sub-request's SObject.
+
+Build per-endpoint: `sfOps[{method,path}] = [{ object: "CampaignMember", op: "create" }, { object: "Campaign", op: "query" }, ...]`
+
+### 4.3 Step 3 — Extract payload-field → SObject.field mapping from DataWeave
+
+Locate the request-mapping DWL. Typically the flow contains an `<ee:transform>` whose `<ee:set-payload>` resource points to `dwls/p-*-input.dwl`. Read that file and trace how each output field is derived from the incoming payload:
+
+**Classification rules — assign a role to each payload field:**
+
+| Role | Signal in DWL | Resolution strategy |
+|---|---|---|
+| **lookup-key** | Field used in a `filter`, `contains`, or `where` clause to match against a query-result field (e.g. `filter ($.Campaign_Key__c == item.campaignName)`) | Query `SELECT DISTINCT <SObject.field> FROM <SObject> WHERE <SObject.field> != null [AND validity filters] LIMIT 10` |
+| **foreign-key-id** | Field mapped directly as a Salesforce relationship Id (e.g. `"LeadId": item.leadId`, `"AccountId": item.accountId`) | Query `SELECT Id FROM <referenced-SObject> WHERE <validity filter> LIMIT 10` |
+| **plain-data** | Free-form field not used in any SF lookup/key (e.g. description, name, phone, date) | Take value from RAML example or MUnit `*-success-request.json`. Mask PII per Postman §8. Do NOT query SF. |
+
+If the DWL is absent or the mapping is not derivable, classify the field as unknown. Surface a chat note and omit the endpoint from the artifact.
+
+### 4.4 Step 4 — Determine topological resolution order for multi-object endpoints
+
+Some endpoints touch multiple SObjects with dependencies (e.g., first query a Campaign to get its Id, then use that Id when creating a CampaignMember). Build a dependency graph:
+
+- A **lookup-key** that resolves to a parent Id that a **foreign-key-id** depends on creates an edge: `Campaign -> CampaignMember`.
+- Resolve nodes in topological order (parents first). Capture the resolved Id/value from each step; use it in the next step's SOQL filter or payload assembly.
+
+This mirrors the `depends_on` / `capture_as` concept in the regression `ruleset.yaml`.
+
+### 4.5 Step 5 — Select the SF login
+
+Call the MCP `list_all_orgs` to get all available aliases. For each alias, probe object visibility:
+
+```soql
+SELECT QualifiedApiName FROM EntityDefinition
+WHERE QualifiedApiName IN ('<obj1>','<obj2>',...)
+```
+
+Choose the alias whose readable set covers **all** objects needed by this endpoint. Known patterns (may differ per org — always re-probe, never hardcode):
+- Standard CRM objects (Lead, Account, Contact, Case, Task, Opportunity) → typically readable by the base integration user.
+- Marketing objects (Campaign, CampaignMember) → require Marketing User license; a separate alias may be needed.
+- Custom `*__c` objects → vary; probe to confirm.
+
+If no single alias covers all needed objects: surface a chat note listing the gap, skip the endpoint, and let the Postman §6.5 chain fall back to MUnit/RAML.
+
+Persist the chosen alias per endpoint in `_provenance._login`.
+
+### 4.6 Step 6 — Build and run read-only resolution SOQLs
+
+For each payload field by role:
+
+**lookup-key** (e.g. `campaignName` maps to `Campaign.Campaign_Key__c`):
+```soql
+SELECT <field> FROM <SObject>
+WHERE <field> != null
+  [AND <validity filters inferred from the app's own query SOQL, e.g. IsActive = true>]
+LIMIT 10
+```
+Pick the first non-null distinct value(s) from the result for the happy-path payload.
+
+**foreign-key-id** (e.g. `leadId` maps to `Lead.Id`):
+```soql
+SELECT Id FROM <SObject>
+WHERE <validity filter>
+LIMIT 10
+```
+Standard validity filters per SObject (infer from app code first; fall back to these defaults):
+- `Lead` → `IsConverted = false`
+- `Case` → `IsClosed = false`
+- `Task` → `IsClosed = false`
+- `Account`, `Contact`, `Opportunity` → `IsDeleted = false`
+- Custom `*__c` → no filter unless the DWL signals one
+- Unknown → no filter
+
+**Uniqueness / junction exclusion:** If the create target SObject has a uniqueness constraint combining multiple foreign keys (e.g., `CampaignMember` is unique on `CampaignId + LeadId`), exclude already-linked records:
+```soql
+SELECT <foreignKeyField> FROM <JunctionObject>
+WHERE <parentField> = '<resolved-parent-id>'
+```
+Then add `AND Id NOT IN (<excluded-ids>)` to the foreign-key-id query so the happy-path call returns Success rather than a duplicate error.
+
+Run all SOQLs via MCP `run_soql_query` against the chosen alias. If a query returns 0 records, surface a chat note and omit the endpoint.
+
+### 4.7 Step 7 — Assemble payloads
+
+**Happy-path body:** construct a JSON body matching the RAML request schema:
+- lookup-key fields: use the resolved `<SObject.field>` value from step 6.
+- foreign-key-id fields: use the resolved `Id` from step 6 (after junction exclusion).
+- plain-data fields: take from MUnit `*-success-request.json` or RAML example; mask PII (phone → `1XXXXXXXXXX`, email → `u***@example.com`).
+- If the schema is an array (like `[{campaignName, leadId}]`), build 2 entries using 2 different resolved records so the happy path is non-trivial.
+
+**Negative-400 body:** construct a body that will trigger a 400 from the app's business logic:
+- Keep all foreign-key-id fields valid (real Ids).
+- Set at least one lookup-key field to a deliberately invalid value (`"non-existent-<field>"` pattern).
+- Do NOT use a missing-field mutation here (that is the §6.12 synthesized floor's job); use the real-id + bogus-key pattern so the 400 traces to the application's "not found" error path.
+
+### 4.8 Step 8 — Write the artifact
+
+Write `project/input_postman/{api}-seed-payloads.json` following the contract in §3. Include:
+- Every successfully resolved endpoint under `endpoints`.
+- `_provenance` per endpoint documenting the SOQL queries used, the SF login alias, and the SObject operations discovered.
+- Top-level `resolvedAt` (ISO-8601).
+
+Surface a single chat summary:
+```
+Live Test Data Resolver — resolution summary:
+- POST /api/v1/memberships — RESOLVED (org: integration_campaign_devint2)
+    campaignName: Campaign.Campaign_Key__c = "RequestCall"
+    leadId: Lead.Id = "00Qbb00000JKVuLEAX" (excluded 0 existing CampaignMembers)
+- GET /api/v1/orders/{id} — SKIPPED (GET with uri param only, no request body)
+- POST /api/v1/unknown — SKIPPED (DWL not derivable; Postman §6.5 will fall back to MUnit)
+Written: project/input_postman/{api}-seed-payloads.json
+```
+
+## 5. Guardrails
+
+- **Read-only throughout.** Use only MCP `run_soql_query`, `list_all_orgs`, `get_username`. Never call `sf data create`, `sf data import`, or any write tool. Never use `deploy_metadata` or `assign_permission_set` for this purpose.
+- **Never modify MUnit fixtures.** The resolver writes only to `project/input_postman/`. MUnit `business-inbound/*.json` files are untouched.
+- **No secrets in the artifact.** The seed-payload JSON contains only Salesforce record Ids and field values. Client credentials, bearer tokens, and API keys never appear.
+- **Fail gracefully.** If any field's resolution fails (0 records, unreachable object, undecodable DWL), omit that endpoint from the artifact rather than guessing. Surface a chat note for every omission.
+- **Stale data.** The artifact records `resolvedAt`. Records may be deleted or updated between resolution and the Postman run. Re-run the resolver before each regression pass.
+- **PII masking.** Plain-data fields containing PII patterns (phone, email, SSN, DOB, address) are masked before writing using the same patterns as `review-logging-standards.mdc`.
+
+## 6. End-to-End Resolution Flow
+
+```mermaid
+flowchart TD
+    Start["User: /use-testdata on <project>"] --> Intent["intent-gen-testdata.mdc"]
+    Intent --> ReadImpl["Read gen-testdata-implementation.mdc"]
+    ReadImpl --> RAML["Step 1: Enumerate non-health endpoints from RAML"]
+    RAML --> SFOps["Step 2: Discover SF operations per endpoint<br/>(salesforce:query, create, update, upsert, composite)"]
+    SFOps --> DWL["Step 3: Extract payload-field → SObject.field mapping<br/>from request-mapping DWLs; classify by role<br/>(lookup-key / foreign-key-id / plain-data)"]
+    DWL --> Topo["Step 4: Build dependency graph;<br/>resolve multi-object endpoints topologically"]
+    Topo --> Login["Step 5: Probe SF logins via EntityDefinition;<br/>select alias covering all objects"]
+    Login --> Covered{All objects<br/>covered?}
+    Covered -->|No| SkipLogin["Chat note: login gap;<br/>omit endpoint, fall back to MUnit"]
+    Covered -->|Yes| SOQL["Step 6: Build and run read-only SOQLs<br/>(lookup-key, foreign-key-id, junction exclusion)"]
+    SOQL --> HasRecords{Records<br/>returned?}
+    HasRecords -->|No| SkipNoRec["Chat note: 0 records;<br/>omit endpoint"]
+    HasRecords -->|Yes| Assemble["Step 7: Assemble happy-path + negative-400 bodies"]
+    Assemble --> Write["Step 8: Write project/input_postman/{api}-seed-payloads.json"]
+    Write --> Summary["Emit resolution summary in chat"]
+    SkipLogin --> Summary
+    SkipNoRec --> Summary
+```
+
+## 7. Worked Example — sfl-campaigns-sys-api
+
+This example shows the complete trace for the campaigns API. Do NOT hardcode these values; derive them fresh each run.
+
+| Step | Evidence found | Derived fact |
+|---|---|---|
+| 2 – SF ops | `post:\memberships:...-spec_config` → `create-campaign-memberships-sub-flow` → `common-connectivity-salesforce-query-flow` (`salesforce:query`) + `common-connectivity-salesforce-create-flow` (`salesforce:create type="#[p('sfl.campaignMember')]"`) | SObjects: Campaign (query), CampaignMember (create) |
+| 2 – type resolution | `config.properties`: `sfl.campaignMember=CampaignMember` | Target create SObject = CampaignMember |
+| 2 – SOQL | `config.properties`: `queryCampaignByCampaignKey=SELECT Id, Name, Campaign_Key__c FROM Campaign where Campaign_Key__c IN` | Query object = Campaign, key field = Campaign_Key__c |
+| 3 – DWL mapping | `p-create-campaign-membership-input.dwl`: `"CampaignId": (queryCampaignResponse filter ($.Campaign_Key__c == item.campaignName))[0].Id` → campaignName = **lookup-key** for Campaign_Key__c; `"LeadId": item.leadId` → leadId = **foreign-key-id** for Lead.Id | Field roles assigned |
+| 4 – topo | Campaign must be resolved first (its Id is used to exclude existing CampaignMembers) | Order: Campaign → Lead (minus existing members) |
+| 5 – login | EntityDefinition probe: `integration.persona` can read Lead but not Campaign; `integration_campaign_devint2` reads both | Chosen alias: integration_campaign_devint2 |
+| 6 – SOQLs | `SELECT Campaign_Key__c FROM Campaign WHERE Campaign_Key__c != null AND IsActive = true LIMIT 10` → "RequestCall" (among others) | campaignName = "RequestCall" |
+| 6 – junction exclusion | `SELECT LeadId FROM CampaignMember WHERE CampaignId = '701bb00001ELSjwAAH' LIMIT 50` → 0 existing | No exclusion needed |
+| 6 – Lead | `SELECT Id FROM Lead WHERE IsConverted = false LIMIT 10` → "00Qbb00000JKVuLEAX", "00Qbb00000JKWATEA5" | 2 fresh Lead Ids |
+| 7 – happy body | `[{"campaignName":"RequestCall","leadId":"00Qbb00000JKVuLEAX"},{"campaignName":"RequestCall","leadId":"00Qbb00000JKWATEA5"}]` | |
+| 7 – negative-400 body | `[{"campaignName":"non-existent-campaign","leadId":"00Qbb00000JKVuLEAX"}]` | real LeadId + bogus campaignName |
+
+## 8. Review Checklist (before declaring done)
+
+- [ ] All non-health endpoints with request bodies evaluated.
+- [ ] SF operations discovered from flow XML (not assumed).
+- [ ] Every payload field classified as lookup-key, foreign-key-id, or plain-data.
+- [ ] Multi-object endpoints resolved in topological order.
+- [ ] SF login selected based on EntityDefinition probe result (not hardcoded).
+- [ ] All SOQLs run via MCP `run_soql_query` (read-only).
+- [ ] Junction uniqueness checked where applicable.
+- [ ] Happy-path body has ≥ 1 entry; negative-400 body uses real ids + bogus key.
+- [ ] `_provenance` block populated for every endpoint written.
+- [ ] Omitted endpoints listed in chat note with reason.
+- [ ] No secrets in the artifact.
+- [ ] PII masked in plain-data fields.
+- [ ] MUnit fixtures not touched.
+- [ ] `project/input_postman/` directory exists (create if needed).

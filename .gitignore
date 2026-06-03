@@ -35,6 +35,7 @@ agents/review/examples/
 project/input_develop/
 project/input_docs/
 project/input_munit/
+project/input_postman/
 project/input_raml/
 project/output_build/
 project/output_develop/

@@ -133,7 +133,132 @@ Before generating or scaffolding any code, **ask the user** for:
 - **Logging placement:** Where to use encrypted vs masked payload? Default: error handlers + common-connectivity = encrypted; business flows = masked for DEBUG.
 - **Azure Key Vault keys:** Secret names for `config-{env}.properties`. All credentials via `${azure-key-vault-properties-provider::secret::<key-name>}`. No `secureProperties` in `mule-artifact.json`; no `config-secure-{env}.properties`.
 - **Notification connector:** Yes or No. If Yes: add notification config, `send-notification-sub-flow` in global error handler, `v-notification-input-body.dwl`, env-specific `notification.api.*` properties. **Use `module-notification:call-notification-api`** (not `module-notification:send`).
-- **Flow/sequence/arch diagram:** Provide as Mermaid code (preferred) or as an image (PNG, JPG, SVG). If an image is provided, the AI will convert it to Mermaid for interpretation; you may review and edit the generated Mermaid before code generation. If not provided, scaffold structure only — do not assume business logic.
+- **Flow/sequence/arch diagram:** Provide as Mermaid code (preferred) or as an image (PNG, JPG, SVG). If an image is provided, the AI will convert it to Mermaid for interpretation; you may review and edit the generated Mermaid before code generation.
+  - **When a diagram is provided:** use it as the primary driver of flow shape and orchestration order.
+  - **When no diagram is provided:** do NOT default to scaffold-only. Instead, derive business logic from the context files in `project/input_develop/` (field-mapping tables, business rules, data-flow narrative, validations, HTTP status conditions in `confluence-design-*.md` / `jira-*.md`). Then generate a Mermaid sequence diagram from that narrative, present it to the user for confirmation, and proceed with full implementation once approved.
+  - **When both a diagram and Confluence context files exist:** combine them — the diagram drives orchestration structure, the Confluence text drives DataWeave transformations, validation logic, and error conditions.
+  - See §2a for the full Business Logic Source Precedence rules and §15a for mapping Confluence tables to DataWeave artifacts.
+
+---
+
+## 2a. Business Logic Sources & Derivation
+
+This section defines how the agent extracts and converts business logic from available inputs into concrete Mule artifacts. It applies every time the agent runs — not only when a diagram is absent.
+
+### Source Precedence (read in this order)
+
+| Priority | Source | Use for |
+|----------|--------|---------|
+| 1 | Flow/sequence/arch diagram (Mermaid or image) | Orchestration shape, flow order, system participants, conditional branches |
+| 2 | `project/input_develop/confluence-design-*.md` | Field mappings, business rules, validations, HTTP status conditions, downstream system details |
+| 3 | `project/input_develop/jira-*.md` | User story, acceptance criteria, edge cases, additional constraints |
+| 4 | RAML / OpenAPI spec | Endpoint contracts, data types, required/optional fields |
+| 5 | User's direct chat description | Gap-fill only when all above are absent or ambiguous |
+
+When multiple sources exist, combine them: higher-priority sources win on conflicts, lower-priority sources fill gaps.
+
+---
+
+### What to Extract from `confluence-design-*.md`
+
+Read every section of the Confluence design file and derive the following:
+
+#### A. Data-Flow Narrative → Orchestration Order
+
+Look for sections titled "Flow Overview", "Integration Pattern & Data Flow", or numbered step lists. Each step maps to a downstream `flow-ref` or sub-flow call.
+
+**Derivation rule:** Numbered steps (e.g., "1. Salesforce publishes event → 2. Experience API transforms → 3. MQ receives...") become the ordered sequence of sub-flows in the implementation flow. Name each sub-flow from the step description.
+
+**Example:** A 7-step narrative produces a process flow with calls in that sequence: receive → validate → transform → call-downstream-sys-api → handle-response → error-log-on-failure → ack.
+
+#### B. Field-Mapping Tables → DataWeave Transform Files
+
+For each endpoint/operation with a "Field Mapping" section (rows of: API Input field | Target field | Type | Mandatory | Description / Transform logic):
+
+1. Create one `p-{operation}-request.dwl` per outbound call (API field → downstream field).
+2. Create one `p-{operation}-response.dwl` per inbound response (downstream field → API response field).
+3. Apply any noted transform logic inline (e.g., "string → single-element array" becomes `[payload.fieldName]`; "hardcoded value" becomes a DWL string literal; "injected property" becomes `Mule::p('prop.key')`).
+4. Mark mandatory fields with `default ""` for strings, `default false` for booleans, `default 0` for numbers if no value is given.
+5. If the source field note says "Injected secure property" or "Injected environment property", reference it via `Mule::p('property.key')` — do not hardcode the value.
+
+**Example mapping row:**
+```
+Phone_Number__c (String from SF Platform Event) → mobileNumbers (Array of Strings)
+Logic: Maps the single incoming phone number string into a single-element JSON array
+```
+Becomes in `p-publish-mq-payload.dwl`:
+```dwl
+mobileNumbers: [payload.Phone_Number__c default ""]
+```
+
+#### C. Business Rules & Validations → Flow Logic
+
+For each item under "Business Rules", "Business Rules & Validations", or "Validations":
+
+1. **Conditional triggers** (e.g., "only process when status = X") → `<choice>` router in the flow with a condition expression; bypass/ack on non-matching branch.
+2. **Counter increments or state updates** → dedicated sub-flow call with a Salesforce/HTTP connector operation (do not silently omit — add a commented `<!-- TODO: implement per business rule -->` stub if the operation details are unclear).
+3. **Scope constraints** (e.g., "Only Transactional SMS CPTC records are considered") → inline DWL filter in the relevant transform.
+4. **Agent/permission restrictions** → these are Salesforce config rules, not Mule flow logic; document in a comment block at the top of the relevant sub-flow file.
+
+#### D. Field Validations Table → Input Validation Sub-flow
+
+For each row in a "Field Validations" table (Field | Rule):
+
+1. Implement validation in a dedicated `validate-input-sub-flow` using a `<choice>` router.
+2. Failing conditions raise `APP:BAD_REQUEST` via `<raise-error>` with a descriptive message matching the validation rule.
+3. Add the validation sub-flow `flow-ref` immediately after the initial variable-setting step in the main implementation flow.
+
+**Example validation row:**
+```
+Phone numbers passed to SFMC | Must be formatted as an 11-digit string for NA, including leading "1"
+```
+Becomes a `<choice>` branch:
+```xml
+<when expression="#[not (vars.requestContext.originalPayload.mobileNumbers[0] matches /^1\d{10}$/)]]">
+    <raise-error type="APP:BAD_REQUEST" description="Phone number must be 11 digits starting with 1"/>
+</when>
+```
+
+#### E. HTTP Status Codes Table → `errors/customErrors.dwl`
+
+For each row in a "HTTP Status Codes" or "Error Conditions" table (Status Code | Trigger Condition | Description):
+
+1. Map project-specific error conditions to the appropriate error type in `customErrors.dwl`.
+2. If the condition is a new error type not in the standard set (§12), add it to the `customErrors.dwl` mapping with the correct HTTP code.
+3. HTTP 422 Unprocessable Entity → `APP:VALIDATION_FAILED`; HTTP 409 Conflict → `APP:DUPLICATE_RECORD`; HTTP 424 Failed Dependency → `APP:DEPENDENCY_FAILED`.
+
+#### F. Downstream Systems Table → Connectivity Config
+
+For each system listed in "Downstream Systems" (System | Role | Type):
+
+1. Create one `{system-name}-request-flow` in `common-connectivity.xml` per downstream system.
+2. Add one `http-{system-name}-server_http-request_config` in `global-config.xml`.
+3. Add `{system-name}.host`, `{system-name}.basePath`, `{system-name}.client_id`, `{system-name}.client_secret` keys in all five env property files (placeholder values only; real values via Azure Key Vault).
+4. If the system's role is "Auth" (token endpoint), implement a token-caching sub-flow using Object Store: check for cached token → if missing/expired, call auth endpoint → store token with TTL.
+
+---
+
+### No-Diagram Fallback — Mermaid Confirmation Gate
+
+When no flow/sequence/arch diagram is provided but Confluence/JIRA context files are present:
+
+1. **Read** all context files as specified above.
+2. **Build** a Mermaid `sequenceDiagram` from the data-flow narrative (§A above). Include all participants, the happy path message sequence, and the error/DLQ path.
+3. **Present** the diagram to the user with this prompt:
+   > "I derived this sequence diagram from the Confluence design. Please review it — if it looks correct, reply 'approved' and I will implement it. If anything is wrong, describe the correction and I will update the diagram before implementing."
+4. **Wait** for explicit user approval (any confirmation phrase — "approved", "looks good", "yes", "proceed", etc.) before writing any Mule XML or DWL files.
+5. **If the user corrects the diagram:** update it and repeat step 3. Do not proceed without approval.
+6. **After approval:** use the confirmed diagram + the derived mapping/rule data to generate all artifacts.
+
+---
+
+### What to Extract from `jira-*.md`
+
+| Section | Use for |
+|---------|---------|
+| **User Story** | Understand the end-to-end intent; cross-check that the derived flow satisfies it |
+| **Acceptance Criteria** | Add one comment per AC item in the relevant sub-flow explaining how that criterion is met |
+| **Technical Notes** | Additional implementation constraints (e.g., token caching TTL, idempotency key header, specific error message text) |
 
 ---
 
@@ -1793,10 +1918,38 @@ fun extractRoutingErrors(errorMessage: Any): String =
 - Lower-case-hyphenated with `.dwl` extension (e.g., `p-composite-query-request.dwl`, `v-request-context.dwl`).
 - **Prefix convention:** `v-` for scripts that set variables; `p-` for scripts that set payload.
 
+### Deriving Transforms from Confluence Mapping Tables (§15a)
+
+When `project/input_develop/confluence-design-*.md` is present, **never leave a DWL file as an empty scaffold**. Follow these rules for every outbound request and every inbound response:
+
+**Step 1 — Identify all mapping tables.** Look for sections titled "Field Mapping", "Integration Endpoints & Field Mappings", "Request / Response Fields", or any table with columns like "API Input | Target Field | Type | Mandatory".
+
+**Step 2 — Create one DWL file per operation direction:**
+- Outbound request transform → `p-{operation}-request.dwl` (maps API/MQ payload fields to downstream system fields)
+- Inbound response transform → `p-{operation}-response.dwl` (maps downstream response fields back to API response shape)
+- Variable-setting transforms → `v-set-target-api-params-{operation}.dwl` (sets `vars.targetApiParams` before `flow-ref` to connectivity flow)
+
+**Step 3 — Populate each field from the mapping table row:**
+
+| Table column | DWL translation |
+|---|---|
+| Plain field copy (same name, same type) | `targetField: payload.sourceField default <type-default>` |
+| Type transformation noted in mapping | Apply inline: array wrap → `[payload.field]`, string concat → `payload.a ++ payload.b`, date format → `payload.date as Date {format: "..."}` |
+| "Hardcoded value" | Use string/number literal directly |
+| "Injected secure property" | `Mule::p('azure-key-vault-properties-provider::secret::<key>')` |
+| "Injected environment property" | `Mule::p('property.key.name')` |
+| Mandatory field with no source noted | `sourceField default ""` (string), `default false` (boolean), `default 0` (number) |
+| Optional field | include as-is; no forced default |
+
+**Step 4 — Cross-check field names against the RAML spec** (if available) to ensure request/response field names match the contract exactly.
+
+**Step 5 — For token-caching auth patterns** (downstream "Auth" system with TTL): create `v-set-auth-token.dwl` that reads from Object Store variable; create `p-{auth-system}-token-request.dwl` with the grant_type + credentials mapping.
+
 ### Error Mappings
 
 - Custom error mapping DWL files go under `src/main/resources/errors/` (e.g., `customErrors.dwl`).
 - Map error types to HTTP status codes, reasons, and messages.
+- **Derive additional error types from the Confluence "HTTP Status Codes" table:** for each non-standard code present (422, 409, 424, etc.), add a corresponding `APP:*` error mapping in `customErrors.dwl` using the rules in §2a-E.
 
 ### Ping/Alive Response DWLs
 
@@ -1878,6 +2031,17 @@ The canonical `p-set-readiness-response-success.dwl` is embedded in Section 10.
 
 ## 17. Response Mapping from Downstream
 
+### Derive response transforms from Confluence mapping tables
+
+When a Confluence design file is present, **do not write a placeholder response DWL**. Instead:
+
+1. Read the "Output field mappings" or "Response Fields" table (columns: API field name | data type | Salesforce/downstream source field | description).
+2. For each row, add the corresponding DWL expression to `p-{operation}-response.dwl`.
+3. If the downstream field name differs from the API field name, apply the rename inline.
+4. If the downstream returns a nested structure but the API expects a flat response (or vice versa), flatten/nest accordingly using DWL `flatMap`, `map`, or nested object syntax.
+5. If the Confluence table says a field is derived from multiple downstream fields (e.g., a composite identifier), combine them inline.
+6. If a downstream field may be absent on error paths, guard with `default`: `apiField: payload.downstreamField default null`.
+
 ### Capture downstream fields before set-payload
 
 - **Rule:** When the RAML response structure differs from the downstream response, capture required fields in variables before overwriting payload.
@@ -1923,7 +2087,10 @@ When asked to build, generate, scaffold, or implement Mule flows, sub-flows, or 
 4. **Plan** the file structure and property definitions for the chosen pattern.
 5. **Generate** the XML and DataWeave code implementing these rules. Create the project under `generated-projects/{project-name}/`.
 6. **Validate** against the Section 20 Self-Validation Checklist.
-7. **Transformations:** Implement only after user provides flow/sequence/arch diagram or explicit requirements; otherwise scaffold structure only.
+7. **Transformations & Business Logic:** Implement from the best available source — do not leave scaffolds empty when context exists.
+   - If a diagram was provided: implement transforms following its flow shape.
+   - If no diagram but `confluence-design-*.md` / `jira-*.md` are present: derive DataWeave transforms from field-mapping tables, implement validation logic from Business Rules & Validations, map HTTP status conditions to `customErrors.dwl`, derive orchestration order from the data-flow narrative, then generate and confirm a Mermaid diagram before writing XML (see §2 and §2a).
+   - Only scaffold empty stubs when neither a diagram nor any Confluence/JIRA context files are available.
 
 **Also read** applicable `review-*.mdc` and `gen-*.mdc` files for detailed checklists.
 

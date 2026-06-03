@@ -46,13 +46,39 @@ See `gen-postman-implementation-v2.mdc` §6.11 for the full list of supported mu
 
 ### Seed successful payloads
 
-For every non-health endpoint (excluding `/ping`, `/health-check*`) the agent asks you once at the STOP-and-ASK gate to provide the seed payload. Three options:
+For every non-health endpoint (excluding `/ping`, `/health-check*`) the agent resolves the seed payload using a four-tier chain. **Stop at the first hit:**
 
-1. **Paste JSON** — validated against the RAML body schema; a mismatch warns but accepts.
-2. **Use MUnit `*-success-request.json`** — auto-pulled from `src/test/resources/testdata/{suite}/business-inbound/`.
-3. **Use RAML example** — inline `example:` block or `examples/` file under the resolved RAML root.
+**Tier 0 (highest priority) — Live-resolved seed payloads**
+If `project/input_postman/{api}-seed-payloads.json` exists (produced by the `agents/testdata` Live Test Data Resolver), the agent reads real Salesforce record Ids and field values from it and uses them as the seed body. This is the recommended path for any POST/PUT endpoint that must succeed against a live Salesforce org. Run `/use-testdata` before `/use-postman` to produce the file. See the resolver pre-step section below for details.
 
-If none of the three resolves, that endpoint is **aborted** with a clear chat error — no empty or placeholder bodies are ever emitted.
+**Tier 1 — User-supplied JSON**
+Paste JSON at the STOP-and-ASK gate — validated against the RAML body schema; a mismatch warns but accepts.
+
+**Tier 2 — MUnit `*-success-request.json`**
+Auto-pulled from `src/test/resources/testdata/{suite}/business-inbound/`. Note: MUnit data is synthetic and will fail business-logic validation against a live SF org.
+
+**Tier 3 — RAML example**
+Inline `example:` block or `examples/` file under the resolved RAML root.
+
+If none of the four tiers resolves, that endpoint is **aborted** with a clear chat error — no empty or placeholder bodies are ever emitted.
+
+### Optional resolver pre-step (recommended for Salesforce system APIs)
+
+Before running `/use-postman`, run the Live Test Data Resolver in a separate chat:
+
+```
+/use-testdata
+```
+
+This auto-derives real Salesforce record Ids and field values for every POST/PUT endpoint by:
+1. Reading the Mule app's Salesforce connector operations from flow XML.
+2. Tracing payload-field → SObject.field mappings from request DataWeave files.
+3. Querying live, valid records read-only from the SF devint/devint2 org via the Salesforce MCP.
+4. Writing `project/input_postman/{api}-seed-payloads.json` as the Tier 0 input.
+
+No Salesforce records are created. MUnit fixtures are not modified. The resolver is entirely optional — if the file is absent, `/use-postman` falls through to Tier 1 (user JSON) as before.
+
+**When to re-run the resolver:** The artifact records `resolvedAt`. If Salesforce data has changed (records deleted, Campaign+Lead already linked, etc.), delete the file and re-run `/use-testdata` before the next regression pass.
 
 ### Required negative coverage
 

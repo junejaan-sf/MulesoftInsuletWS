@@ -4,6 +4,7 @@ globs: ["**/*.postman_collection.json"]
 alwaysApply: false
 ---
 
+
 # Postman Collection Implementation Guidelines for MuleSoft APIs (v2)
 
 You are a MuleSoft API integration engineer. You must adhere to these rules when generating any `.postman_collection.json` file so that the collection is consistent, secure, and runnable across environments.

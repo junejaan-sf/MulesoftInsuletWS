@@ -4,6 +4,7 @@ globs:
 alwaysApply: false
 ---
 
+
 # Intent: Build Validator
 
 Trigger on any of these phrases (case-insensitive):

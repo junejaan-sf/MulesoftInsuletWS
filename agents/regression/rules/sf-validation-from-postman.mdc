@@ -4,6 +4,7 @@ globs:
 alwaysApply: false
 ---
 
+
 # SF Validation from Postman Output
 
 This procedure is invoked by `run-regression-implementation.mdc` (Step 6) when

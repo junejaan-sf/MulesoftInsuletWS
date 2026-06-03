@@ -55,14 +55,43 @@ Read the requirements, RAML spec, or Confluence design from `project/input_devel
 
 ## Procedure
 
-1. Complete Step 0 (pattern identification) and the Mandatory Preflight above
+1. Complete Step 0 (pattern identification) and the Mandatory Preflight above.
+
 2. **Check `project/input_develop/` for pre-fetched JIRA and Confluence context files:**
-   - **If `jira-*.md` and `confluence-design-*.md` are both present:** Read them immediately to understand the full business requirements, acceptance criteria, downstream systems, and Confluence design decisions. Do NOT re-fetch from JIRA or Confluence.
+   - **If `jira-*.md` and `confluence-design-*.md` are both present:** Read them immediately. Do NOT re-fetch from JIRA or Confluence.
    - **If either or both files are missing:** Inform the user which file(s) are absent and ask: *"No pre-fetched JIRA/Confluence context was found in `project/input_develop/`. Would you like me to fetch it now? If yes, please provide the JIRA story ID."*
    - **If the user provides a JIRA story ID:** Fetch the JIRA story and its linked Confluence page, then save `jira-{STORY-ID}.md` and `confluence-design-{STORY-ID}.md` to `project/input_develop/` before proceeding.
    - **If the user says to proceed without:** Continue using only the RAML spec and any other files present in `project/input_develop/`.
-3. **Understand the integration requirements** from the pre-fetched context files, RAML spec, or user's description
-4. **Generate Mule artifacts** following the standards — every generated file must match the template structure read in the Mandatory Preflight
+
+3. **Derive business logic from available sources** — follow the Source Precedence model in `implementation-ruleset_v4.mdc §2a` exactly:
+
+   a. **If a flow/sequence/arch diagram was provided** (Mermaid code or image): use it as the primary orchestration structure. Extract participant names, message sequence, and branching conditions from it.
+
+   b. **Always extract from Confluence/JIRA context files** (whether or not a diagram exists):
+      - **Data-flow narrative** (Flow Overview / numbered steps) → orchestration order and sub-flow names
+      - **Field-mapping tables** → list of `p-*.dwl` and `v-*.dwl` files to create, with their populated field expressions
+      - **Business Rules & Validations** → conditional routing (`<choice>` branching), scope filters, counter/state update stubs
+      - **Field Validations table** → inputs for `validate-input-sub-flow` raising `APP:BAD_REQUEST`
+      - **HTTP Status Codes table** → additional entries in `errors/customErrors.dwl`
+      - **Downstream Systems table** → connectivity configs, property keys, and auth-caching flows to create
+
+   c. **When both a diagram and Confluence context files exist:** combine — diagram drives flow shape and order; Confluence text drives DataWeave expressions, validation logic, and error conditions.
+
+   d. **When NO diagram is provided but Confluence/JIRA context files ARE present:**
+      - Build a Mermaid `sequenceDiagram` from the data-flow narrative.
+      - Include: all participants, the happy-path sequence, and the error/DLQ path.
+      - Present it to the user: *"I derived this sequence diagram from the Confluence design. Please review — reply 'approved' to proceed, or describe any corrections."*
+      - **Do not write any Mule XML or DWL until the user confirms.** After approval, implement using the confirmed diagram plus all derived mapping/rule data.
+
+   e. **Only scaffold empty stubs** when neither a diagram nor Confluence/JIRA context is available.
+
+4. **Build the implementation plan** (state it in chat before writing files):
+   - List every file that will be created/modified
+   - For each `p-*.dwl`, list the fields it will contain (derived from mapping tables)
+   - Identify which business rules map to which sub-flows
+   - Call out any genuinely ambiguous mappings that need user input before proceeding
+
+5. **Generate Mule artifacts** following the standards — every generated file must match the template structure read in the Mandatory Preflight and must be populated from the derived business logic (not left as empty scaffolds).
 
 ## Generation Scope
 
