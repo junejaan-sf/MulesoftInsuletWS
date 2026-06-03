@@ -1,0 +1,54 @@
+---
+description: Triggers Postman collection generation when the user asks to generate, create, scaffold, or build a Postman collection for a MuleSoft API
+globs:
+alwaysApply: false
+---
+
+# Postman Collection Generation Intent
+
+When the user's request is about **generating**, **creating**, **scaffolding**, or **building** a Postman collection for a MuleSoft API, use this intent to guide the process.
+
+## Procedure
+
+1. **Read `gen-postman-implementation.mdc`** in full — it contains the complete specification, extraction algorithms, security rules, validation checks, and the v2.1 JSON skeleton you must follow.
+2. **Locate the RAML spec — follow this lookup chain in order, stop at the first hit** (full algorithm in `gen-postman-implementation.mdc` §4.1):
+   1. **POM dependency management** — read `pom.xml` and look in `<dependencyManagement>` / `<dependencies>` for an artifact whose `artifactId` matches `{api-name}-spec` (classifier `raml`/`raml-fragment`). Capture `groupId`, `artifactId`, `version`.
+   2. **Anypoint Exchange (via MCP)** — call `CallMcpTool` `search_asset` with `searchQuery: "{api-name}-spec"`, `assetFilters: ["rest-api"]`, `statuses: ["published"]`. If found, this is the canonical source.
+   3. **Local Maven cache** — check `/Users/sbajpayee/.m2/repository/{groupId-with-slashes}/{api-name}-spec/{version}/` for the unpacked RAML or the `*.zip` artifact. Unzip if needed.
+   4. **Workspace fallback** — `agents/raml/examples/{api-name}-spec/`
+   5. **In-project fallback** — `src/main/resources/api/`
+
+   If all five tiers miss, ASK the user for the RAML location via `AskQuestion`.
+2b. **Check `project/input_develop/` for pre-fetched JIRA and Confluence context files:**
+   - **If `jira-*.md` and `confluence-design.md` are both present:** Read them to extract field-level request/response examples (→ richer request body fixtures), endpoint descriptions (→ request descriptions), and acceptance criteria (→ scenario naming). Do NOT re-fetch from JIRA or Confluence.
+   - **If either or both files are missing:** Proceed using RAML and MUnit fixtures alone.
+3. **Locate other inputs**:
+   - MUnit suites under `src/test/munit/*-test-suite.xml`
+   - MUnit fixtures under `src/test/resources/testdata/{suite}/business-inbound/` and `business-outbound/`
+   - Source flows under `src/main/mule/*.xml` (needed by the non-HTTP flow pre-filter in implementation §6 step 2)
+4. **Run the STOP-and-ASK gate** described in `gen-postman-implementation.mdc` §3 before any writes. Do not proceed with default assumptions.
+5. **Resolve the deployed public URL per environment** using the three-tier fallback (MCP → ASK user → placeholder) defined in `gen-postman-implementation.mdc` §5:
+   - Primary: MuleSoft MCP `list_applications` (and `list_api_instances` as fallback)
+   - Secondary: ask the user for any unresolved env
+   - Last resort: write a `TODO-set-base-url-for-<ENV>` placeholder and surface a chat warning
+6. **Pre-filter non-HTTP flows** per `gen-postman-implementation.mdc` §6 step 2 — skip suites whose source flow is `anypoint-mq:subscriber`, `scheduler`, `file:listener`, `jms:listener`, etc. Emit a chat note listing every skipped suite with the reason.
+7. **Extract** request payloads, headers, query/uri params, and expected response examples from MUnit fixtures (or RAML examples as fallback) per `gen-postman-implementation.mdc` §6.
+8. **Apply the per-endpoint negative-scenario allow-list** `{400, 401, 404, 500}` per `gen-postman-implementation.mdc` §6.1 — emit only the codes evidenced for each endpoint, never blanket-apply.
+9. **Build** the Postman v2.1 collection using the JSON skeleton in `gen-postman-implementation.mdc` §7.
+10. **Scrub secrets** before writing, using the security checklist in `gen-postman-implementation.mdc` §8. Never bake `client_id`, `client_secret`, or bearer tokens into the file — always use Postman variables.
+11. **Validate** the result against the checks in `gen-postman-implementation.mdc` §10 (schema URL, URL parsing, secret scan, status-code allow-list, no event-driven flows).
+12. **Write** the file to `agents/postman/examples/{api-name}.postman_collection.json` per `gen-postman-implementation.mdc` §10.1.
+
+## Generation Scope
+
+- A single Postman v2.1 collection file: `{api-name}.postman_collection.json`
+- Per-environment folders (only those the user selected): `local`, `DEV`, `QA`, `UAT`, `PROD`
+- Each env folder contains a `Happy Path` sub-folder and a `Negative` sub-folder
+- One Postman request per `endpoint × scenario` (deduplicated across MUnit tests)
+- Standard MuleSoft headers (`client_id`, `client_secret`, `x-correlation-id`, `sourceSystem`, `targetSystem`) referenced via collection variables
+
+## Hard Exclusions
+
+- No requests for non-HTTP-triggered flows (MQ subscribers, schedulers, file/JMS listeners)
+- No status codes outside `{400, 401, 404, 500}` for negatives — `403`, `409`, `422`, `502`, `503`, `504`, and timeouts are forbidden
+- No hardcoded secrets, bearer tokens, or real credentials anywhere in the output

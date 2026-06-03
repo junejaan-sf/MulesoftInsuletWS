@@ -1,0 +1,490 @@
+---
+description: Full implementation spec for the build validator agent — secrets file management, VM-arg composition, Maven execution, error classification, fix recipes, iteration policy, log redaction, and output format.
+globs:
+alwaysApply: false
+---
+
+# Implementation: Build Validator
+
+---
+
+## Variables
+
+```
+PROJECT      = <name of the Mule project directory under project/output_develop/>
+PROJECT_DIR  = project/output_develop/{PROJECT}
+PHASE        = package | test                       (from intent rule)
+ENV          = dev | local | qa | uat | prod         (from user; default dev)
+TIMESTAMP    = $(date +"%Y%m%d-%H%M%S")
+OUTDIR       = project/output_build
+LOG_FILE     = ${OUTDIR}/{PROJECT}-{PHASE}-{TIMESTAMP}.log
+FIXES_FILE   = ${OUTDIR}/{PROJECT}-{PHASE}-fixes.md
+SUMMARY_FILE = ${OUTDIR}/{PROJECT}-{PHASE}-summary.json
+SECRETS_FILE = ${INSULET_VMARGS_FILE:-~/.insulet-mule/vmargs/{PROJECT}.properties}
+MAX_ATTEMPTS = 5   (user can override in chat: "use N attempts")
+```
+
+---
+
+## Step 1 — Secrets File Gate
+
+### 1a. Path validation
+
+Resolve `SECRETS_FILE`. If the resolved path is inside a directory tracked by git (i.e., anywhere under the current workspace or any path that contains a `.git` folder as a parent), **stop immediately** and tell the user:
+
+```
+STOP: INSULET_VMARGS_FILE points inside a git repository.
+The secrets file must live outside any repo to prevent accidental commits.
+Recommended location: ~/.insulet-mule/vmargs/{PROJECT}.properties
+```
+
+### 1b. Init flow (file does not exist)
+
+If `SECRETS_FILE` does not exist:
+
+1. Create the directory: `mkdir -p ~/.insulet-mule/vmargs`
+2. Write the fixed-schema template to `SECRETS_FILE`:
+
+```properties
+# {PROJECT} — Insulet MuleSoft VM args
+# Location: ~/.insulet-mule/vmargs/{PROJECT}.properties
+# chmod 600 — owner-read only. Never commit. Never paste in chat.
+#
+# Keys required by mvn clean package / mvn clean test:
+#   ANYPOINT_PLATFORM_CLIENT_ID     → -Danypoint.platform.client_id=...
+#   ANYPOINT_PLATFORM_CLIENT_SECRET → -Danypoint.platform.client_secret=...
+#   AZURE_TENANT_ID                 → -DAZURE_TENANT_ID=...
+#   AZURE_CLIENT_ID                 → -DAZURE_CLIENT_ID=...
+#   AZURE_CLIENT_SECRET             → -DAZURE_CLIENT_SECRET=...
+#   MULE_AZURE_KEY_VAULT_NAME       → -DMULE_AZURE_KEY_VAULT_NAME=...
+#
+# Empty value is allowed: emits -DKEY='' (valid for local-only runs).
+# Missing key (line absent entirely) causes the agent to fail fast.
+
+ANYPOINT_PLATFORM_CLIENT_ID=
+ANYPOINT_PLATFORM_CLIENT_SECRET=
+
+AZURE_TENANT_ID=
+AZURE_CLIENT_ID=
+AZURE_CLIENT_SECRET=
+MULE_AZURE_KEY_VAULT_NAME=
+```
+
+3. Set file permissions: `chmod 600 "$SECRETS_FILE"`
+4. **Stop** and tell the user:
+
+```
+Created ~/.insulet-mule/vmargs/{PROJECT}.properties
+
+Fill in the values for these 6 keys, then re-run /use-build:
+  - ANYPOINT_PLATFORM_CLIENT_ID
+  - ANYPOINT_PLATFORM_CLIENT_SECRET
+  - AZURE_TENANT_ID
+  - AZURE_CLIENT_ID
+  - AZURE_CLIENT_SECRET
+  - MULE_AZURE_KEY_VAULT_NAME
+
+The file is chmod 600 and lives outside the workspace — it will never be committed.
+```
+
+### 1c. Permission check (file exists)
+
+```bash
+PERMS=$(stat -f "%A" "$SECRETS_FILE" 2>/dev/null || stat -c "%a" "$SECRETS_FILE")
+if [ "$PERMS" != "600" ]; then
+  chmod 600 "$SECRETS_FILE"
+  echo "WARNING: secrets file was $PERMS — corrected to 600"
+fi
+```
+
+### 1d. Parse and validate
+
+Read `SECRETS_FILE`. Parse every non-blank, non-comment line as `KEY=value` (value may be empty).
+
+Build the **required key set**: `ANYPOINT_PLATFORM_CLIENT_ID`, `ANYPOINT_PLATFORM_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `MULE_AZURE_KEY_VAULT_NAME`.
+
+For each required key:
+- Present in file (even with blank value) → OK
+- **Missing entirely** (no line with that key) → add to `MISSING_KEYS`
+
+If `MISSING_KEYS` is non-empty, **stop** and tell the user:
+
+```
+STOP: The following keys are missing from {SECRETS_FILE}:
+  - KEY_NAME_1
+  - KEY_NAME_2
+Add them to the file and re-run /use-build.
+```
+
+Print only key *names* — never values.
+
+---
+
+## Step 2 — VM-Arg Composition
+
+Compose `VM_ARGS` using the fixed composition table below. Quote every value with single quotes to handle empty values and special characters.
+
+| Output flag | Source key in secrets file |
+|---|---|
+| `-Dmule.env={ENV}` | literal — ENV from intent rule |
+| `-Danypoint.platform.gatekeeper=disabled` | literal — always present |
+| `-Danypoint.platform.client_id='...'` | `ANYPOINT_PLATFORM_CLIENT_ID` |
+| `-Danypoint.platform.client_secret='...'` | `ANYPOINT_PLATFORM_CLIENT_SECRET` |
+| `-DAZURE_TENANT_ID='...'` | `AZURE_TENANT_ID` |
+| `-DAZURE_CLIENT_ID='...'` | `AZURE_CLIENT_ID` |
+| `-DAZURE_CLIENT_SECRET='...'` | `AZURE_CLIENT_SECRET` |
+| `-DMULE_AZURE_KEY_VAULT_NAME='...'` | `MULE_AZURE_KEY_VAULT_NAME` |
+
+`VM_ARGS` is an in-memory variable. It is **never echoed to chat**, never written to disk verbatim, and never logged.
+
+---
+
+## Step 3 — Log Redaction
+
+Before any output is written to `LOG_FILE` or shown in chat, apply the following redaction pipeline:
+
+1. Build `SECRET_VALUES` — the set of non-empty values loaded from `SECRETS_FILE`.
+2. Sort `SECRET_VALUES` longest-first to prevent partial-match issues.
+3. Replace each secret value occurrence in stdout/stderr with `***REDACTED***`.
+4. Also replace these patterns regardless of secrets file:
+   - `Bearer [A-Za-z0-9._\-]+` → `Bearer ***REDACTED***`
+   - `client_secret=[^&\s]+` → `client_secret=***REDACTED***`
+   - `client_id=[^&\s]+` (when preceded by `anypoint`) → `client_id=***REDACTED***`
+   - `password=[^&\s]+` → `password=***REDACTED***`
+   - `access_token["\s:=]+[A-Za-z0-9._\-]+` → `access_token: ***REDACTED***`
+5. Write redacted output to `LOG_FILE`.
+
+`mvn -X` (debug) and `mvn -e` (stacktraces) are **disabled by default** — verbose Maven output significantly expands the leak surface. If the user explicitly requests `-X` or `-e`, add a single warning in chat before proceeding:
+
+```
+WARNING: Maven debug/verbose mode is active. Log output will contain significantly more detail.
+Ensure you review project/output_build/*.log before sharing it.
+```
+
+---
+
+## Step 4 — Maven Execution
+
+Create the output directory:
+
+```bash
+mkdir -p project/output_build
+```
+
+**Package phase:**
+
+```bash
+mvn -B -ntp clean package -DskipTests $VM_ARGS \
+  2>&1 | tee /tmp/build-stdout.txt
+BUILD_EXIT=$?
+```
+
+**Test phase:**
+
+```bash
+mvn -B -ntp clean test $VM_ARGS \
+  2>&1 | tee /tmp/build-stdout.txt
+BUILD_EXIT=$?
+```
+
+After each run:
+- Apply redaction pipeline to `/tmp/build-stdout.txt`
+- Append redacted output to `{OUTDIR}/{PROJECT}-{PHASE}-attempt-{N}.log`
+- Remove `/tmp/build-stdout.txt`
+
+If `BUILD_EXIT == 0` → green. Write success summary (Step 7) and exit.
+
+If `BUILD_EXIT != 0` → proceed to Step 5.
+
+---
+
+## Step 5 — Error Classification
+
+Read the redacted log from the latest attempt. For the **test phase**, also read surefire XML reports from `{PROJECT_DIR}/target/surefire-reports/*.xml`.
+
+Match against the catalog below (first match wins):
+
+### CLASS A — Mule XML Schema / Namespace
+
+**Fingerprints:**
+- `cvc-elt.1.a: Cannot find the declaration of element`
+- `cvc-complex-type.2.4: Invalid content`
+- `org.xml.sax.SAXParseException`
+- `Attribute '...' is not allowed to appear in element`
+- `flow-ref.*not found` / `sub-flow '...' is not defined`
+
+**Recipe:**
+1. Identify the offending XML file from the error path in the log.
+2. Check `xmlns` declarations in the file header against the canonical template in `agents/develop/templates/`.
+3. Add any missing namespace declarations (`xmlns:ee`, `xmlns:http`, `xmlns:apikit`, etc.).
+4. Fix `doc:id` attribute format (must be UUID-like, no spaces).
+5. Fix `flow-ref name` to match the actual sub-flow name in the project.
+
+---
+
+### CLASS B — POM Dependency / Enforcer
+
+**Fingerprints:**
+- `Could not resolve dependencies for project`
+- `Artifact ... not found`
+- `Rule 0: org.apache.maven.plugins:maven-enforcer-plugin`
+- `version ... is not in the allowed set`
+- `duplicate dependency`
+
+**Recipe:**
+1. Identify the missing artifact ID and group ID from the error.
+2. Add the `<dependency>` block to `pom.xml` under the correct scope (`compile`, `test`, `provided`).
+3. If a version conflict is reported, align the version to the one declared in `<dependencyManagement>` (do not introduce a hardcoded version outside `dependencyManagement`).
+4. Never remove existing dependencies.
+
+---
+
+### CLASS C — Property Key Missing
+
+**Fingerprints:**
+- `Property '${...}' could not be resolved`
+- `Could not resolve placeholder '...' in value`
+- `key '...' not found in properties`
+
+**Recipe:**
+1. Extract the missing key name from the fingerprint.
+2. Add the key with a `${VAR}` reference (or empty value) to **every** `config-*.properties` file under `src/main/resources/properties/` — all envs must stay in sync.
+3. Do not hardcode literal values — use the same pattern as adjacent keys in the file.
+
+---
+
+### CLASS D — DataWeave Compile Error
+
+**Fingerprints:**
+- `dwl:line [0-9]+:` (any DataWeave compile error)
+- `Cannot coerce .* to .*`
+- `Unable to resolve reference`
+- `Cannot call .* with \(.*\)` (wrong argument types)
+- `org.mule.weave.v2.exception.WeaveException`
+- `Unexpected token` (DWL syntax)
+
+**Recipe:**
+1. Open the cited `.dwl` file at the cited line.
+2. For missing imports: add the appropriate `import` at the top (`import dw::core::Strings`, `import dw::core::Arrays`, etc.).
+3. For type coercion: add an explicit cast (`as String`, `as Number`, `as Date {format: "yyyy-MM-dd"}`) or a `default` clause.
+4. For syntax errors: fix the specific token — do not rewrite surrounding logic.
+5. For undefined references: check if the variable is declared in a `vars.*` set-variable upstream; if it's genuinely missing, add a `default null` or `default {}` guard.
+
+---
+
+### CLASS E — MUnit Mock Shape Mismatch
+
+**Fingerprints:**
+- `MockEventException`
+- `payload type DataType.* does not match expected`
+- `Cannot process event on mocked operation`
+- `mock-when.*does not match`
+
+**Recipe:**
+1. Locate the `mock-when` block in the MUnit test XML that references the failing operation.
+2. Align the payload DataType in the mock to match what the connector actually returns (e.g., `application/json` vs `application/java`).
+3. Fix namespace prefix mismatches in the `mock-when` `processor` attribute.
+4. Do not change assertion logic or expected values — only the mock shape.
+
+---
+
+### CLASS F — Connector Config Missing Required Attribute
+
+**Fingerprints:**
+- `Required configuration property '...' for connector`
+- `Attribute '...' is required`
+- `Missing required attribute in connector config`
+
+**Recipe:**
+1. Identify the connector and the missing attribute from the error.
+2. Open the connector config in `src/main/mule/common/global-config.xml`.
+3. Add the missing attribute using the default pattern from `agents/develop/templates/` for the same connector type.
+4. If no template exists, use the most common Insulet pattern (e.g., `reconnection frequency` + `failsOnFirstAttempt`).
+
+---
+
+### CLASS G — MUnit Assertion Logic Failure (ESCALATE)
+
+**Fingerprints:**
+- `<failure>` element in surefire XML report
+- `expected: <...> but was: <...>`
+- `AssertionError`
+- `junit.framework.AssertionFailedError`
+- `The assertion failed`
+
+**Action:** Do NOT attempt any patch. **Escalate immediately.**
+
+Report in chat:
+
+```
+ESCALATE — MUnit assertion failure (attempt {N})
+
+Test:    {test suite name} > {test case name}
+Expected: {expected value from surefire <failure>}
+Actual:   {actual value from surefire <failure>}
+
+Relevant flow snippet:
+  {the 10–20 lines of the Mule flow or DWL that produce the asserted value}
+
+This failure requires human judgment — the expectation may be stale,
+or the logic may be producing incorrect output.
+Review the test and the flow, fix the correct side, then re-run /use-build.
+
+Log: project/output_build/{PROJECT}-test-attempt-{N}.log
+```
+
+---
+
+### CLASS H — Credential / Secret / TLS Error (ESCALATE)
+
+**Fingerprints:**
+- `401 Unauthorized` from Azure Key Vault or Anypoint Platform
+- `Azure Key Vault authentication failed`
+- `InvalidClientSecret` / `InvalidClientId`
+- `TLS` / `SSL` / `certificate` in the error context
+- `Bearer token` / `token expired`
+- `Access denied` from Anypoint Platform
+
+**Action:** Do NOT attempt any patch. **Escalate immediately.**
+
+Report in chat:
+
+```
+ESCALATE — Credential / TLS error (attempt {N})
+
+Error class: {brief description, no values}
+Context:     {redacted log excerpt — 5–10 lines}
+
+The secrets file at {SECRETS_FILE} may have incorrect or expired values.
+Steps to resolve:
+1. Verify the values in {SECRETS_FILE} are current and correct.
+2. Confirm the Azure service principal has the required Key Vault access policy.
+3. Confirm the Anypoint client ID/secret has the correct permissions for env={ENV}.
+4. Re-run /use-build after correcting the values.
+
+Do not paste the secrets file contents into chat.
+```
+
+---
+
+### No Match → ESCALATE
+
+If none of the classes A–H match, escalate with the raw (redacted) error excerpt and the message:
+
+```
+ESCALATE — Unclassified build failure (attempt {N})
+
+The error does not match any known auto-fix pattern.
+
+Redacted error excerpt:
+  {10–20 lines from the log}
+
+Review the full log at: project/output_build/{PROJECT}-{PHASE}-attempt-{N}.log
+```
+
+---
+
+## Step 6 — Iteration Policy
+
+```
+ATTEMPT = 1
+
+while ATTEMPT <= MAX_ATTEMPTS:
+    run Maven (Step 4)
+    if exit code == 0:
+        write success summary, exit loop
+    classify error (Step 5)
+    if class is G or H or unclassified:
+        escalate, exit loop
+    apply fix recipe
+    append fix diff to FIXES_FILE
+    ATTEMPT += 1
+
+if ATTEMPT > MAX_ATTEMPTS and last exit != 0:
+    escalate with ceiling message:
+      "Reached {MAX_ATTEMPTS} attempts without a green build.
+       Review project/output_build/{PROJECT}-{PHASE}-fixes.md for all patches applied.
+       Final log: project/output_build/{PROJECT}-{PHASE}-attempt-{N}.log"
+```
+
+After **each patch**, write a diff entry to `{FIXES_FILE}`:
+
+```markdown
+## Attempt {N} — {Error class name}
+
+**File:** `{path/to/patched/file}`
+**Error fingerprint:** `{matched fingerprint}`
+
+**Before:**
+```
+{original lines}
+```
+
+**After:**
+```
+{patched lines}
+```
+```
+
+---
+
+## Step 7 — Output Files
+
+### summary.json
+
+Write `{SUMMARY_FILE}` on exit (success or escalation):
+
+```json
+{
+  "project": "{PROJECT}",
+  "phase": "{PHASE}",
+  "env": "{ENV}",
+  "timestamp": "{TIMESTAMP}",
+  "status": "success | escalated | ceiling_reached",
+  "attempts": {N},
+  "fixes_applied": [
+    { "attempt": 1, "class": "CLASS_B", "file": "pom.xml", "description": "Added mule-azure-key-vault dependency" }
+  ],
+  "unresolved": [
+    { "attempt": 2, "class": "CLASS_G", "description": "MUnit assertion failure in patient-identity-test-suite" }
+  ],
+  "log_files": [
+    "project/output_build/{PROJECT}-{PHASE}-attempt-1.log",
+    "project/output_build/{PROJECT}-{PHASE}-attempt-2.log"
+  ],
+  "fixes_file": "project/output_build/{PROJECT}-{PHASE}-fixes.md"
+}
+```
+
+### Chat summary table
+
+```
+| # | Phase   | Result | Error class              | Fix applied                            | Log                                          |
+|---|---------|--------|--------------------------|----------------------------------------|----------------------------------------------|
+| 1 | package | FAIL   | CLASS_B: POM dep missing | Added com.mulesoft.connectors:mule-... | project/output_build/{PROJECT}-package-attempt-1.log |
+| 2 | package | PASS   | —                        | —                                      | project/output_build/{PROJECT}-package-attempt-2.log |
+```
+
+Footer:
+
+```
+Build result: PASS | FAIL | ESCALATED
+Reports:
+  Log     → project/output_build/{PROJECT}-{PHASE}-{TIMESTAMP}.log
+  Fixes   → project/output_build/{PROJECT}-{PHASE}-fixes.md
+  Summary → project/output_build/{PROJECT}-{PHASE}-summary.json
+```
+
+---
+
+## Safety Constraints
+
+- **Never** `git commit`, `git push`, or `mvn deploy`.
+- **Never** echo, log, or paste secret values — key names only.
+- **Never** modify credential plumbing (AKV config, TLS config, token endpoints, `mule-artifact.json` `secureProperties`).
+- **Never** delete files — only edit or add.
+- **Never** rewrite test assertion logic — only mock shapes.
+- Redact all log output before writing or showing in chat.
+- Refuse to run if `INSULET_VMARGS_FILE` resolves inside a git repo.
+- Enforce `chmod 600` on `SECRETS_FILE` before every run.
+- `mvn -X` / `mvn -e` disabled by default; warn before enabling.

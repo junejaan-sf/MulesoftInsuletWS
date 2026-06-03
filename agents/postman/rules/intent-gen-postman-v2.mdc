@@ -1,0 +1,65 @@
+---
+description: Triggers Postman collection generation when the user asks to generate, create, scaffold, or build a Postman collection for a MuleSoft API
+globs:
+alwaysApply: false
+---
+
+# Postman Collection Generation Intent (v2)
+
+When the user's request is about **generating**, **creating**, **scaffolding**, or **building** a Postman collection for a MuleSoft API, use this intent to guide the process.
+
+## Procedure
+
+1. **Read `gen-postman-implementation-v2.mdc`** in full — it contains the complete specification, extraction algorithms, security rules, validation checks, mutation library, and the v2.1 JSON skeleton you must follow.
+2. **Locate the RAML spec — follow this lookup chain in order, stop at the first hit** (full algorithm in `gen-postman-implementation-v2.mdc` §4.1):
+   1. **POM dependency management** — read `pom.xml` and look in `<dependencyManagement>` / `<dependencies>` for an artifact whose `artifactId` matches `{api-name}-spec` (classifier `raml`/`raml-fragment`). Capture `groupId`, `artifactId`, `version`.
+   2. **Anypoint Exchange (via MCP)** — call `CallMcpTool` `search_asset` with `searchQuery: "{api-name}-spec"`, `assetFilters: ["rest-api"]`, `statuses: ["published"]`. If found, this is the canonical source.
+   3. **Local Maven cache** — check `/Users/sbajpayee/.m2/repository/{groupId-with-slashes}/{api-name}-spec/{version}/` for the unpacked RAML or the `*.zip` artifact. Unzip if needed.
+   4. **Workspace fallback** — `agents/raml/examples/{api-name}-spec/`
+   5. **In-project fallback** — `src/main/resources/api/`
+
+   If all five tiers miss, ASK the user for the RAML location via `AskQuestion`.
+2b. **Check `project/input_develop/` for pre-fetched JIRA and Confluence context files:**
+   - **If `jira-*.md` and `confluence-design.md` are both present:** Read them to extract field-level request/response examples (→ richer request body fixtures), endpoint descriptions (→ request descriptions), and acceptance criteria (→ scenario naming). Do NOT re-fetch from JIRA or Confluence.
+   - **If either or both files are missing:** Proceed using RAML and MUnit fixtures alone.
+2c. **Check `project/input_postman/*.xlsx` for a test case workbook:**
+   - **Exactly one `.xlsx` present** → set `testCaseFile = <path>` and announce it in chat (e.g., `"Found test case workbook: project/input_postman/NGASIM-3143-test-cases.xlsx — will drive negative scenario set."`). This workbook drives all negative scenarios per `gen-postman-implementation-v2.mdc` §6.11.
+   - **Multiple `.xlsx` files** → use `AskQuestion` to ask which one to use before proceeding.
+   - **No `.xlsx` file** → set `testCaseFile = null`, note in chat: `"No test case workbook found in project/input_postman/ — using MUnit-driven flow."`, and proceed with today's MUnit-driven flow (unchanged except for the required-negatives floor in step 8a).
+3. **Locate other inputs**:
+   - MUnit suites under `src/test/munit/*-test-suite.xml`
+   - MUnit fixtures under `src/test/resources/testdata/{suite}/business-inbound/` and `business-outbound/`
+   - Source flows under `src/main/mule/*.xml` (needed by the non-HTTP flow pre-filter in `gen-postman-implementation-v2.mdc` §6.2)
+4. **Run the STOP-and-ASK gate** described in `gen-postman-implementation-v2.mdc` §3.1 before any writes. Do not proceed with default assumptions. The gate includes per-endpoint seed payload prompts for every non-health endpoint.
+5. **Resolve the deployed public URL per environment** using the three-tier fallback (MCP → ASK user → placeholder) defined in `gen-postman-implementation-v2.mdc` §5:
+   - Primary: MuleSoft MCP `list_applications` (and `list_api_instances` as fallback)
+   - Secondary: ask the user for any unresolved env
+   - Last resort: write a `TODO-set-base-url-for-<ENV>` placeholder and surface a chat warning
+6. **Pre-filter non-HTTP flows** per `gen-postman-implementation-v2.mdc` §6.2 — skip suites whose source flow is `anypoint-mq:subscriber`, `scheduler`, `file:listener`, `jms:listener`, etc. Emit a chat note listing every skipped suite with the reason.
+7. **Resolve seed payloads** per `gen-postman-implementation-v2.mdc` §6.5 for every non-health endpoint. This runs regardless of whether a workbook is present. Use the §6.5 precedence chain: user-supplied JSON → MUnit `*-success*-request.json` → RAML example → abort.
+8. **Extract or mutate negative scenarios:**
+   - **Workbook present (`testCaseFile` set):** run the row-by-row mutation algorithm in `gen-postman-implementation-v2.mdc` §6.11 — library match → LLM field-aware mutation → ask user. Happy path still uses MUnit classification (§6.3).
+   - **Workbook absent (`testCaseFile == null`):** extract request payloads, headers, query/uri params, and expected response examples from MUnit fixtures (or RAML examples as fallback) per `gen-postman-implementation-v2.mdc` §6 steps 1–6 and apply per-endpoint tailoring (§6.9).
+
+   In both modes, the negative-scenario allow-list is `{400, 401, 404, 500}` per `gen-postman-implementation-v2.mdc` §6.3. When the workbook is present it supersedes the MUnit-derived negative checklist but is still capped to this allow-list.
+8a. **Enforce the required-negatives floor** per `gen-postman-implementation-v2.mdc` §6.12: every non-health endpoint must emit at least one request each for `400`, `401`, and `404`. If the workbook or MUnit didn't cover any of those codes for an endpoint, synthesize the missing request(s) using the §6.11 mutation library defaults and surface the synthesized list in a chat note. `500` is never synthesized — it remains evidence-driven.
+9. **Build** the Postman v2.1 collection using the JSON skeleton in `gen-postman-implementation-v2.mdc` §7.
+10. **Scrub secrets** before writing, using the security checklist in `gen-postman-implementation-v2.mdc` §8. Never bake `client_id`, `client_secret`, or bearer tokens into the file — always use Postman variables. The only sanctioned exception is the `invalid-credentials` literal pair (`"invalid-client-id"` / `"invalid-client-secret"`) in the `401` negative request.
+11. **Validate** the result against the checks in `gen-postman-implementation-v2.mdc` §10.2 (schema URL, URL parsing, secret scan, required-negatives floor, status-code allow-list, workbook row coverage, no event-driven flows).
+12. **Write** the file to `agents/postman/examples/{api-name}.postman_collection.json` per `gen-postman-implementation-v2.mdc` §10.1.
+
+## Generation Scope
+
+- A single Postman v2.1 collection file: `{api-name}.postman_collection.json`
+- Per-environment folders (only those the user selected): `local`, `DEV`, `QA`, `UAT`, `PROD`
+- Each env folder contains a `Happy Path` sub-folder and a `Negative` sub-folder
+- One Postman request per `endpoint × scenario` (deduplicated across MUnit tests)
+- Standard MuleSoft headers (`client_id`, `client_secret`, `x-correlation-id`, `sourceSystem`, `targetSystem`) referenced via collection variables
+- **Every non-health endpoint carries at minimum one `400`, one `401`, and one `404` negative request** — synthesized from the §6.11 library defaults if not supplied by the workbook or MUnit
+
+## Hard Exclusions
+
+- No requests for non-HTTP-triggered flows (MQ subscribers, schedulers, file/JMS listeners)
+- No status codes outside `{400, 401, 404, 500}` for negatives — `403`, `409`, `422`, `502`, `503`, `504`, and timeouts are forbidden
+- No hardcoded secrets, bearer tokens, or real credentials anywhere in the output (the `invalid-credentials` literal pair is the only sanctioned exception)
+- No non-2xx scenarios with the unmutated seed payload unless the §6.11 library entry explicitly permits it

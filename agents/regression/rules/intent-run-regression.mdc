@@ -1,0 +1,34 @@
+---
+description: Run regression / integration tests against a Postman collection using Newman CLI and generate an HTML + JSON report.
+globs:
+alwaysApply: false
+---
+
+# Intent: Run Regression Tests
+
+Trigger on any of these phrases (case-insensitive):
+- "run regression"
+- "run integration tests"
+- "test the collection"
+- "run the collection"
+- "run postman"
+- "execute tests"
+
+## Procedure
+
+1. **Read `run-regression-implementation.mdc` in full** before taking any other action.
+
+2. **Locate the collection**
+   - Glob `agents/postman/examples/*.postman_collection.json`
+   - If exactly one file is found, use it automatically and tell the user which one.
+   - If multiple files are found, list them and ask the user which one to run.
+   - If none are found, stop and tell the user to run `/use-postman` first.
+
+3. **Determine the environment**
+   - Ask the user: "Which environment? `local` or `DEV`" — unless they already specified it in their message.
+
+4. **Run the credential gate** (see implementation rule).
+
+5. **Execute Newman and generate reports** following the full spec in `run-regression-implementation.mdc`.
+
+6. **Post the chat summary table** with per-request results and a footer pointing to the saved report files.

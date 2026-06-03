@@ -6,7 +6,7 @@
 .vscode/
 poc/
 regression-tooling/
-rules/
+/rules/
 
 # Secrets / MCP config — never commit
 mcp.json
