@@ -1,0 +1,394 @@
+---
+description: >-
+  Insulet MuleSoft design-phase standards reference. The design agent reads this file
+  internally to validate generated content against all enforced standards before writing
+  output. This file is NOT included as a section in the generated design document — the
+  full standards live in agents/review/rules/. Reference this during design generation only.
+globs:
+alwaysApply: false
+---
+
+# Insulet MuleSoft Design Standards Reference
+
+> **Purpose:** Internal context for the design agent. Apply these standards when generating
+> design documents to ensure the output is consistent with what the develop, RAML, and review
+> agents will enforce. Full canonical rules are in `agents/review/rules/` and
+> `agents/raml/rules/`. This file is a compact design-phase digest.
+
+---
+
+## 1. API & Project Naming
+
+**Rule:** `{name}-{layer}-api` — no regional prefix, lower-case, hyphen-separated.
+- ✅ `payments-sys-api`, `drupal-exp-api`, `benefits-investigation-proc-api`
+- ❌ `na-payments-sys-api`, `NA_Payments_SYS_API`
+
+**Layers:** `sys` (system), `proc` (process), `exp` (experience)
+
+**Max length:** 42 characters (Anypoint Runtime Manager limit). Use short forms if needed: `##-##-sapi`, `##-##-papi`, `##-##-xapi`.
+
+**RAML spec name:** `{name}-{layer}-api-spec` (e.g., `payments-sys-api-spec`)
+**Root RAML file name** must match the project name: `payments-sys-api-spec.raml`
+
+**Exchange asset title:** User-friendly Title Case (e.g., `sfl-leads-sys-api-spec` → `SFL Leads System API`)
+
+**Canonical rule:** `agents/review/rules/review-api-design-standards.mdc`
+
+---
+
+## 2. URL Pattern
+
+```
+Base path:  /{api-technical-name}/api/{version}/
+Health:     GET /api/ping
+            GET /api/health-check
+Business:   plural noun collections (e.g., /customers/profiles, /orders, /payments)
+```
+
+- Collections use **plural** nouns (e.g., `/customers/profiles`)
+- Singular resources use **singular** nouns (e.g., `/customer/{id}`)
+- Version in URL = major semver only: `v1`, `v2`
+- **baseUri is MANDATORY** in every root RAML: `baseUri: https://api.example.com/{project-name}/api/{version}`
+- **Canonical rule:** `agents/review/rules/review-api-design-standards.mdc`
+
+---
+
+## 3. Flow & Sub-Flow Naming
+
+When documenting planned flow names in the design, use these patterns:
+
+| Type | Pattern | Example |
+|---|---|---|
+| Main API flow | `{api-spec-name}-main` | `payments-sys-api-spec-main` |
+| APIKit flows | `{method}:\{resource}:{api-config}` | Do NOT rename — APIKit-generated |
+| Business flows | `{descriptive-name}-flow` | `create-customer-profile-flow` |
+| Sub-flows | `{descriptive-name}-sub-flow` | `resolve-authnet-credentials-sub-flow` |
+| Flow XML files | lower-case-hyphenated `.xml` | `create-customer-profile.xml` |
+
+**Message Processor `doc:name`:** Never leave default Anypoint Studio names on processors (e.g., "Transform Message", "Set Variable"). Use descriptive, readable names in Title Case.
+- Transforms: `FV` prefix for variable-setting (optional, minor), `DW` prefix for payload (optional, minor)
+- HTTP Requests: describe the target system (e.g., `REQUEST USPS SYS API`)
+- Custom Logger: describe the log point (e.g., `Log Entry`, `Log Exit`, `Log Error`)
+
+**Canonical rule:** `agents/review/rules/review-mule-flow-naming.mdc`
+
+---
+
+## 4. Error Handling Pattern
+
+Every System API must implement the global error handler pattern:
+
+```
+global-error-handler.xml          ← dedicated file, referenced via defaultErrorHandler-ref
+  ├── on-error-continue            ← in global handler (returns structured response)
+  └── on-error-propagate           ← in sub-flows (bubbles up to global handler)
+
+errors/customErrors.dwl            ← error type → HTTP status code mappings
+errors/errorCatalog.dwl            ← error codes, reasons, messages
+```
+
+**Standard error → HTTP status mappings:**
+
+| Mule Error Type | HTTP Status |
+|---|---|
+| `HTTP:BAD_REQUEST` | 400 |
+| `HTTP:UNAUTHORIZED` | 401 |
+| `HTTP:NOT_FOUND` | 404 |
+| `APP:CONNECTIVITY_FAILED` | 503 |
+| `HTTP:INTERNAL_SERVER_ERROR` | 500 |
+| `MULE:UNKNOWN` | derived from error details |
+
+Add **502** (Bad Gateway) when the API calls an external system that returns its own errors (e.g., Salesforce Composite API failure). This is distinct from 503 (the API itself is unavailable).
+
+**External HTTP retries:** Use `until-successful` for connectivity retries on external HTTP calls where appropriate. Connectivity failures should raise `APP:CONNECTIVITY_FAILED`.
+
+**Error handler logging — two loggers required:**
+1. `build-error-log-without-payload` (INFO, `com.insulet.general`) — error context with `errorType`, `errorDescription`, `cause`, `errorCode`; no payload; **`tracepoint="EXCEPTION"` must be set explicitly** (connector default `FLOW_START` is wrong in error context)
+2. `build-error-log-with-masked-payload` OR `build-error-log-with-encrypted-payload` (DEBUG) — protected payload for triage; also requires explicit `tracepoint="EXCEPTION"`
+
+**Async/event-driven APIs additionally require:**
+- `on-error-continue` to prevent message loss
+- Dead Letter Queue (DLQ) publish on failure
+- Notification on DLQ publish failure
+
+**Canonical rule:** `agents/review/rules/review-error-handling.mdc`
+
+---
+
+## 5. Logging Standards
+
+**Always use `module-logger` (Insulet Custom Logger Connector). Never use built-in Mule `logger`.**
+
+| Operation | Default Level | When to Use |
+|---|---|---|
+| `build-log-without-payload` | INFO | Flow milestones, metadata — no payload |
+| `build-log-with-masked-payload` | DEBUG | Debugging structure with sensitive fields as `***` |
+| `build-log-with-encrypted-payload` | DEBUG | Full AES-256-CBC encrypted payload for compliance/audit |
+| `build-error-log-without-payload` | INFO/ERROR | Error context without payload |
+| `build-error-log-with-masked-payload` | DEBUG | Error with masked payload for triage |
+| `build-error-log-with-encrypted-payload` | DEBUG | Error with encrypted payload for incident recovery |
+
+**Log categories (packages):**
+
+| Category | Level | Purpose |
+|---|---|---|
+| `com.insulet.general` | INFO | Milestones and metadata. No payload allowed. |
+| `com.insulet.maskedpayload` | DEBUG | Masked payloads for debugging structure |
+| `com.insulet.encryptedpayload` | DEBUG | Fully encrypted payloads for compliance/audits |
+
+**Connector defaults:** The connector auto-sets `category` based on the operation when not explicitly provided. Absent `category` is acceptable (minor); mismatched `category` is a Major violation.
+
+**Required attributes on every logger:** `config-ref`, `message`, `sourceSystem`, `targetSystem`, `tracepoint`, `category`
+
+**Standardized tracepoints (use only these values):**
+- `FLOW_START` / `FLOW_END`
+- `BEFORE_HTTP_REQUEST` / `AFTER_HTTP_REQUEST`
+- `BEFORE_DB_CALL` / `AFTER_DB_CALL`
+- `BEFORE_SALESFORCE` / `AFTER_SALESFORCE`
+- `CRITICAL_CHECKPOINT`
+- `VALIDATION`
+- `APPLICATION_EVENT`
+- `TRANSFORMATION`
+- `EXCEPTION`
+
+**Connector default for `tracepoint`:** `FLOW_START`. Must be set explicitly when context requires a different value:
+- Error handlers → must explicitly set `EXCEPTION` (Major if absent or wrong)
+- Exit loggers → must explicitly set `FLOW_END` (Major if absent)
+- Entry loggers → `FLOW_START` default is correct (Minor best practice to make explicit)
+
+**Log4j2 configuration:** Single `log4j2.xml` file — no env-specific log4j files. Declare three `AsyncLogger` entries:
+```xml
+<AsyncLogger name="com.insulet.general" level="INFO" />
+<AsyncLogger name="com.insulet.maskedpayload" level="DEBUG" />
+<AsyncLogger name="com.insulet.encryptedpayload" level="DEBUG" />
+```
+
+**PROD policy:** `DEBUG` is only allowed temporarily during active triage — must be reverted. For PROD, set `com.insulet.*` categories to `WARN` via Maven resource filtering or deployment configuration.
+
+**Global connector configuration must include:**
+- `sensitiveKeyParts` — comma-separated PII/credential field fragments (e.g., `ssn,password,secret,token,email,cardNumber`)
+- `safeKeys` — keys to exclude from masking (e.g., `passwordPolicy`)
+- `encryptionKey` — Base64-encoded 256-bit AES key, sourced from secure vault only
+- `entityDetails` — must contain **only** non-sensitive business identifiers (e.g., `orderId`)
+
+**Cross-cutting concerns — do NOT show in architecture diagrams:**
+- Request-context capture (log entry/exit)
+- Correlation-ID propagation
+- API Manager policy enforcement
+
+Document these once in a prefatory paragraph at the top of the Backend Mapping & Logic section.
+
+**Canonical rule:** `agents/review/rules/review-logging-standards.mdc`
+
+---
+
+## 6. Security Standards
+
+- **Zero tolerance for clear-text secrets** in any file (properties, XML, DWL)
+- Secrets live in **Azure Key Vault** — reference via secure property providers, never inline
+- When a secure vault provider is used, AES encryption and `secureProperties` in `mule-artifact.json` are **not required** — the vault handles secret protection at runtime
+- If AES-encrypted values are used instead of a vault, they **must** be declared in `mule-artifact.json` `secureProperties`
+- Azure Key Vault secret names follow project naming convention (e.g., `authnet-api-login-id`, `global-logger-encryption-key`)
+- **Client ID Enforcement** applied via API Manager Automated Policy; each API-to-API call has its own client application
+- **Never log raw payloads** — use masked or encrypted `module-logger` operations only
+- `sensitiveKeyParts` must mask PII fragments: `ssn,password,secret,token,email,cardNumber`
+- `safeKeys` must be configured for false-positive exclusions (e.g., `passwordPolicy`)
+- The logger `encryptionKey` must be sourced from secure vault — never hardcoded
+- Encryption keys must never appear in properties files or source-controlled files
+
+**Canonical rule:** `agents/review/rules/review-security-standards.mdc`
+
+---
+
+## 7. DataWeave File Standards
+
+All DWL scripts must be externalized — no complex inline DataWeave in Mule XML.
+
+| Location | Content |
+|---|---|
+| `src/main/resources/dwls/` | All transformation scripts |
+| `src/main/resources/errors/` | `customErrors.dwl`, `errorCatalog.dwl` — error type → HTTP status mappings |
+
+**Naming:**
+- Lower-case-hyphenated with `.dwl` extension
+- `v-` prefix → scripts that set **variables** (e.g., `v-request-context.dwl`)
+- `p-` prefix → scripts that set **payload** (e.g., `p-set-create-profile-request.dwl`)
+- Examples: `v-authnet-credentials.dwl`, `p-create-customer-profile-request.dwl`
+
+**Canonical rule:** `agents/review/rules/review-dataweave-standards.mdc`
+
+---
+
+## 8. Properties File Standards
+
+**Required files for every project:**
+```
+src/main/resources/properties/
+├── config.properties            ← common (all envs), no secrets
+├── config-local.properties
+├── config-dev.properties
+├── config-qa.properties
+├── config-uat.properties
+└── config-prod.properties
+```
+
+- `config-secure-{env}.properties` is **NOT used** — secrets are managed via secure vault (Azure Key Vault), not secure properties files
+- Sub-folders by environment are acceptable for additional mapping files (e.g., `properties/dev/`)
+- Use `.properties` format (not `.yaml` unless there is a project-wide decision to use YAML)
+- Property keys: **lower-case, dot-separated** (e.g., `authnet.baseUri`, `http.port`, `common.api.client-id`)
+- Environment loaded via `config-${mule.env}.properties` pattern using `configuration-properties`
+
+**Canonical rule:** `agents/review/rules/review-properties-config.mdc`
+
+---
+
+## 9. Global Configuration Standards
+
+**All global configuration elements must be in a single file:**
+`src/main/mule/common/global-config.xml` (or `global.xml`)
+
+This includes: HTTP listeners, ObjectStore references, connector configs, APIKit config, error handler refs, etc. No configuration elements should exist in implementation flow files.
+
+**Configuration element naming:** `{description}_{type}` — description parts separated by hyphens.
+- ✅ `customer-sapi_httpListenerConfig`, `env_propertiesConfig`, `oauth_objectStore`
+- Exception: Global Property elements use the variable name (e.g., `mule.env`)
+- When both `name` and `doc:name` exist, set them to the **same value**
+
+**No hard-coded values:** All values that change per environment must be parameterized via properties:
+- HTTP listener host, port, protocol
+- API autodiscovery ID and base path
+- Backend connector host/port
+- Retry counts and timeout settings
+- Never use literal host, port, URL, or credential in configuration elements
+
+**Canonical rule:** `agents/review/rules/review-mule-global-config.mdc`
+
+---
+
+## 10. RAML / API Spec Standards
+
+- **Business endpoints MUST use `CommonLib.generic` resourceType** — this is mandatory, not optional
+- Standard health checks: always include `/ping` (liveliness) and `/health-check` (readiness) using `CommonLib.liveliness-probe` and `CommonLib.readiness-probe` resource types
+- **`baseUri` is MANDATORY**: `baseUri: https://api.example.com/{project-name}/api/{version}`
+- Library: `CommonLib` pointing to `exchange_modules/e0bc8c96-9dbd-48bc-915e-3e29577af6b3/common-fragment-library/1.0.2/common-fragment-library.raml`
+- Folder names: **camelCase** (`dataTypes`, `enumTypes`, `traits`, `examples`)
+- Non-root files: **TitleCase** (`CreateCustomerProfileRequest.raml`, `ErrorResponsesTrait.raml`)
+- Example files in `examples/`: TitleCase (e.g., `CreateCustomerProfileRequestExample.raml`) — do not use lowercase-hyphenated
+- `type` (resource type) is applied to **resources** only — not to methods
+
+**Mandatory traits for all business endpoints:**
+| Trait | Purpose |
+|---|---|
+| `CommonLib.common-error-handler` | Exclusive source of 4xx/5xx error responses — do NOT manually define error codes |
+| `CommonLib.common-headers` | Common request/response headers |
+| `CommonLib.system-headers` | System-level headers |
+| `client-id-required` | API authentication |
+
+**Prohibited — manual error definitions:** Do NOT define 4xx or 5xx responses in the root RAML for business endpoints. All error handling inherits from `CommonLib.common-error-handler` in the `is:` section.
+
+**Response data wrapping:** Every response example and its `DataType` must have a top-level `data` element as the parent.
+
+**Canonical rule:** `agents/raml/rules/gen-raml-implementation.mdc`
+
+---
+
+## 11. Field & Example Naming — camelCase Everywhere
+
+All JSON field names in request payloads, response payloads, input tables, and mapping tables
+**must be camelCase**. This applies to every example and every table in the generated document.
+
+- ✅ `merchantCustomerId`, `customerProfileId`, `expirationDate`, `firstName`
+- ❌ `merchant_customer_id`, `MerchantCustomerId`, `MERCHANTCUSTOMERID`
+
+---
+
+## 12. HTTP Status Codes by Method (fixed — do not deviate)
+
+| Method | Success | Client Errors | Server Error |
+|---|---|---|---|
+| GET | 200 | 400, 401, 404 | 500 |
+| POST (create) | 201 | 400, 401 | 500 |
+| PUT / PATCH | 200 | 400, 401 | 500 |
+| DELETE | 204 | 400, 401, 404 | 500 |
+
+Add **502** (Bad Gateway) when the API calls an external system that can return its own errors (e.g., Salesforce Composite API, external REST API).
+Add **503** when the API itself is unavailable due to a connectivity failure (`APP:CONNECTIVITY_FAILED`).
+Add **409** for duplicate-resource conflicts (POST only).
+
+---
+
+## 13. Standard Error Response Format (fixed — always the same)
+
+Every error response in Insulet APIs uses this format. Never deviate:
+
+```json
+{
+  "correlationId": "a1b2c3d4-1234-5678-abcd-ef1234567890",
+  "errorCode": "NAMESPACE:ERROR_CODE",
+  "description": "Human-readable description of the failure.",
+  "errorDetails": [
+    {
+      "message": "Downstream or validation error message.",
+      "code": "NAMESPACE:ERROR_CODE"
+    }
+  ]
+}
+```
+
+- `correlationId`: Mule-generated UUID for end-to-end tracing
+- `errorCode`: `NAMESPACE:SCREAMING_SNAKE_CASE` (e.g., `AUTHNET:DUPLICATE_PROFILE`, `HTTP:BAD_REQUEST`, `SALESFORCE-COMPOSITE:VALIDATION`)
+- `description`: Human-readable sentence — no internal implementation details (no flow names, DWL names, connector class names)
+- `errorDetails`: one entry per downstream error; omit array if empty. Use same `NAMESPACE:SCREAMING_SNAKE_CASE` format for `code`. Use `message` for the human-readable downstream error message.
+
+**Common error code namespaces:**
+| Namespace | Used for |
+|---|---|
+| `HTTP:` | Standard HTTP errors (400, 401, 404, 500) |
+| `SALESFORCE:` | Salesforce Connector errors (SOQL, connectivity) |
+| `SALESFORCE-COMPOSITE:` | Salesforce Composite Connector errors |
+| `APP:` | Custom application errors (`APP:CONNECTIVITY_FAILED`) |
+| `MULE:` | Internal Mule runtime errors |
+| `{SYSTEM}:` | External system errors (e.g., `AUTHNET:DUPLICATE_PROFILE`) |
+
+---
+
+## 14. MUnit Testing Standards
+
+These apply to the develop agent output and are documented here so the design can account for testability.
+
+- **70% minimum code coverage** per test suite and overall
+- **One test suite per Mule flow file** (one-to-one correlation)
+- Each flow must have **at least one positive** (happy path) and **at least one negative** (error) test case
+- **All external calls must be mocked** — no real HTTP, Salesforce, or MQ calls in unit tests
+- Test suites under `src/test/munit/`; test resources under `src/test/resources/`
+- Run via `mvn clean test -P<profile>` before committing
+
+**Canonical rule:** `agents/review/rules/review-munit-testing.mdc`
+
+---
+
+## 15. Maven & POM Standards
+
+- **Semantic versioning:** `major.minor.patch` (e.g., `1.0.17`). Development: `--SNAPSHOT` suffix
+  - Major: breaking changes (renamed resources, structural model changes)
+  - Minor: non-breaking additions (new endpoints, enhanced error handling)
+  - Patch: bug fixes, refactoring
+- **No hardcoded Exchange credentials in POM** — use `settings.xml` for Anypoint Exchange and Mule EE authentication
+- **`settings.xml` required servers:** `anypoint-exchange-v3`, `eu-anypoint-exchange-v3`, `mulesoft-release-ee`
+- RAML spec must be pulled from Anypoint Exchange as a dependency with `raml` classifier and `zip` type
+- Keep RAML spec version in sync with the APIKit configuration
+
+**Canonical rule:** `agents/review/rules/review-pom-maven-standards.mdc`
+
+---
+
+## 16. What Does NOT Belong in a Design Document
+
+These items belong in implementation agents (`/use-raml`, `/use-develop`) — never in the design:
+- RAML snippets or API spec code
+- DataWeave (DWL) scripts, file names, or transformation logic
+- Mule XML fragments or flow/sub-flow names used as headings
+- MUnit test cases, test data, or coverage percentages
+- Build or deployment scripts
+- Internal connector operation names as primary text (e.g., `Execute Composite Graph`, `Query XML Stream`) — reference the connector name and its role, not the operation symbol
+- Log variable names, DWL file names, or internal implementation symbols

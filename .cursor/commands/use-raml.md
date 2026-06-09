@@ -1,3 +1,5 @@
+Generate or update a RAML API spec from a design doc, existing spec, or chat description.
+
 # RAML / API Specification Agent
 
 @project/input_raml/

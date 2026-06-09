@@ -1,3 +1,5 @@
+Code Review — evaluate a Mule project against the implementation ruleset (CRITICAL/MAJOR/MINOR).
+
 # Code Review Agent
 
 @agents/review/rules/intent-review.mdc

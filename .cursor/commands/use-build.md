@@ -1,3 +1,5 @@
+Build Validator — auto-detect mvn package vs test phase and auto-fix common build/MUnit failures.
+
 # Build Validator Agent
 
 @agents/build/rules/intent-build.mdc

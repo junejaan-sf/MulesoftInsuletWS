@@ -1,3 +1,5 @@
+Generate a RAML spec from a JIRA story and its linked Confluence design page.
+
 # RAML from JIRA Agent
 
 Generates a RAML API spec by fetching a JIRA story and its linked Confluence design page — no manual input required beyond the story ID.

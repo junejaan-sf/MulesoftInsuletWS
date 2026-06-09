@@ -41,6 +41,7 @@ use-raml
 use-raml-from-jira
 use-raml-to-exchange
 use-regression
+use-requirements
 use-review
 ```
 
@@ -58,6 +59,7 @@ use-review
 | `/use-raml-from-jira` | Generate a RAML spec by fetching a JIRA story and its linked Confluence design page. |
 | `/use-raml-to-exchange` | Fetch JIRA + Confluence, generate/update the RAML spec, upgrade common-fragment-library, then publish to Anypoint Exchange. |
 | `/use-regression` | Run a Postman collection from `agents/postman/examples/` as a regression suite and write HTML + JSON reports. |
+| `/use-requirements` | Generate a fully detailed Agile integration user story as Jira-ready Markdown from a Jira ID or the five inputs. |
 | `/use-review` | Code Review — evaluate a Mule project against the consolidated implementation ruleset and report CRITICAL/MAJOR/MINOR findings. |
 
 ---

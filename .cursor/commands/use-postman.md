@@ -1,3 +1,5 @@
+Generate a Postman collection from RAML/OpenAPI specs and MUnit fixtures.
+
 # Postman / Integration Testing Agent
 
 @project/input_postman/

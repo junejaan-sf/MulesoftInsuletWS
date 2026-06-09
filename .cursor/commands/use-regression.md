@@ -1,3 +1,5 @@
+Run a Postman collection as a regression suite; write HTML + JSON reports.
+
 # Regression / Integration Test Agent
 
 @agents/regression/rules/intent-run-regression.mdc

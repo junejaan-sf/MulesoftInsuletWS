@@ -1,0 +1,256 @@
+---
+description: >-
+  Salesforce design-time validation rule. Validates SF objects, fields, picklist values,
+  auto-populated fields, and operations (composite graph, SOQL, INSERT, UPDATE, UPSERT)
+  against a live SF org before a design document is generated. Produces an Open Questions
+  section and a context block for the design rule to consume. Triggered from Step 2.5 of
+  intent-gen-confluence-design.mdc whenever an endpoint interacts with Salesforce.
+globs:
+alwaysApply: false
+---
+
+# Salesforce Design Validation
+
+**Persona:** Expert MuleSoft Integration Architect and Salesforce Solution Architect.
+
+**Purpose:** Validate that every Salesforce object, field, and operation referenced in a
+design mapping is accessible and correctly configured in the target org before any design
+document is written. Surface gaps as structured Open Questions so the design is grounded
+in real org metadata.
+
+**Available MCP tools:**
+- `salesforce` → `@salesforce/mcp` (SF_TARGET_ORG: devint2)
+- `sf-R2` → `@salesforce/mcp` (SF_TARGET_ORG: r2devint)
+
+> This rule must NOT be used for data modification. All operations are read-only
+> (describe, query). Never run DML or Apex that mutates records.
+
+---
+
+## Inputs (received from the calling design rule)
+
+- `mapping_files` — paths to CSV or markdown field mapping files in scope
+- `endpoints` — list of in-scope endpoints with HTTP method and SF object targets
+- `operations` — per-endpoint operation type: `Composite Graph`, `SOQL Query`, `INSERT`, `UPDATE`, `UPSERT`
+
+---
+
+## Phase A — Setup
+
+Ask the user **two questions in one message** — do not proceed until both are answered:
+
+1. **Target org:** Which Salesforce org should validation run against?
+   - `salesforce` MCP (devint2 — integration dev org)
+   - `sf-R2` MCP (r2devint — R2 dev org)
+
+2. **Integration user:** What Salesforce username or Connected App / profile name will
+   MuleSoft authenticate as? (Used to interpret field-access findings.)
+
+Store answers as `target_org` and `integration_user` for use in all subsequent phases.
+
+---
+
+## Phase B — Object and Field Validation
+
+Run for every SF object referenced in the mapping files.
+
+**B1 — Object existence**
+
+For each object name call `salesforce_describe_object`. Record:
+- `EXISTS` — describe succeeded
+- `MISSING` — describe returned an error or empty result
+
+**B2 — Field existence**
+
+From the describe response, check every field listed in the mapping:
+- `EXISTS` — field appears in the describe `fields` array
+- `MISSING` — field not found on the object
+
+**B3 — Field-level access for the integration user**
+
+From the describe `fields` array check the `createable` and `updateable` booleans for
+each field against the context of `integration_user`. Flag any field where:
+- `createable: false` on an INSERT-targeted field
+- `updateable: false` on an UPDATE/UPSERT-targeted field
+- Both false → `NO ACCESS`
+
+All findings — MISSING objects, MISSING fields, NO ACCESS fields — accumulate into
+the Open Questions list (Phase E).
+
+---
+
+## Phase C — Field Type Analysis
+
+For every field marked `EXISTS` in Phase B, inspect its type metadata:
+
+### C1 — Picklist fields
+
+If `type` is `picklist` or `multipicklist`:
+- Extract the `picklistValues` array from the describe response.
+- Filter to entries where `active: true`.
+- Store the list: `{ object, field, values: [...] }`.
+- These values are the **only** allowed examples in §4.N.1 JSON payloads in the design.
+  Never invent picklist values.
+- No enum validation is added to the MuleSoft flow — picklist enforcement stays in Salesforce.
+
+### C2 — Auto-populated / non-writable fields
+
+Flag a field as **non-writable** when any of the following is true:
+- `calculatedFormula` is non-null (formula field)
+- `autoNumber: true`
+- `createable: false` AND `updateable: false` (system-managed)
+- The mapping says "send Email" but the field's `type` is not `email` or it is a formula
+
+Add to Open Questions: *"Field `<Object>.<Field>` is auto-populated by Salesforce and
+cannot be written by the MuleSoft integration. Remove from the outbound mapping or
+treat as read-only."*
+
+### C3 — External ID fields
+
+For any UPSERT operation, identify fields where `externalId: true` in the describe
+response. Confirm the field listed in the mapping as the upsert key carries this flag.
+If it does not, add to Open Questions.
+
+---
+
+## Phase D — Operation Validation
+
+Run the following check for each in-scope operation. Use **read-only** SOQL only — no DML.
+
+### D1 — SOQL Query
+
+Execute the SOQL from the design context using the target MCP server (substitute literal
+example values for bind variables). Validate:
+- No API error returned
+- Objects and fields in the SELECT and WHERE clauses are accessible
+- Record count returned is reasonable (0 records is fine; an API error is not)
+
+### D2 — INSERT / CREATE
+
+Using the describe response:
+- Identify all fields where `nillable: false` AND `defaultedOnCreate: false` AND
+  `createable: true`.
+- Verify every such required field is present in the mapping.
+- Flag any required field absent from the mapping in Open Questions.
+
+### D3 — UPDATE
+
+Verify the `Id` field or a confirmed External ID field (from Phase C3) is present
+in the mapping as the record locator. Flag absence in Open Questions.
+
+### D4 — UPSERT
+
+In addition to D3 checks, confirm the External ID field is marked `externalId: true`
+via describe. If not, add Open Question: *"Field `<Field>` is not configured as an
+External ID in Salesforce. UPSERT will fail at runtime."*
+
+### D5 — Composite Graph
+
+For each sub-request node in the composite definition:
+- Validate the `sobject` exists (Phase B1).
+- Validate all body fields exist on that sobject (Phase B2).
+- Validate that any `referenceId` used in a child node body (e.g. `"@{parentRef.Id}"`)
+  refers to a `referenceId` that appears **earlier** in the graph node list.
+- Flag any forward reference or circular reference in Open Questions.
+- Validate the HTTP method for each node: `POST` → create, `PATCH` → update.
+
+Run a smoke-check SOQL against each composite-targeted object after describe validation
+to confirm live org connectivity: `SELECT Id FROM <SObject> LIMIT 1`.
+
+---
+
+## Phase E — Open Questions Report
+
+Produce this exact structured section. Include only the sub-tables that have at least
+one row; omit empty sub-tables.
+
+```markdown
+## SF Validation — Open Questions
+
+> Generated by sf-design-validation · Org: <target_org> · Integration user: <integration_user>
+
+### Missing Objects
+| Object | Status | Action Required |
+|---|---|---|
+| <SObject> | MISSING | Create custom object in SF org before deployment |
+
+### Missing or Inaccessible Fields
+| Object | Field | Status | Action Required |
+|---|---|---|
+| <SObject> | <Field__c> | MISSING | Deploy custom field to org |
+| <SObject> | <Field> | NO ACCESS | Grant field-level security to <integration_user> profile |
+
+### Auto-Populated / Non-Writable Fields
+| Object | Field | Reason | Recommendation |
+|---|---|---|---|
+| <SObject> | <Field> | Formula / system-managed | Remove from outbound mapping; treat as read-only |
+
+### External ID / Upsert Issues
+| Object | Field | Issue | Action Required |
+|---|---|---|---|
+| <SObject> | <Field__c> | Not marked externalId:true | Enable External ID flag in SF field definition |
+
+### Composite Graph Issues
+| Node referenceId | Issue | Recommendation |
+|---|---|---|
+| <referenceId> | Forward reference to <other> | Reorder nodes so parent appears before child |
+
+### Picklist Values Confirmed (use only these values in design examples)
+| Object | Field | Active Values |
+|---|---|---|
+| <SObject> | <PicklistField> | Value1, Value2, Value3 |
+```
+
+After rendering the Open Questions section, ask the user:
+
+> "Review the SF validation findings above. Do you want to:
+> (A) Proceed with the design — MISSING items will be flagged as TBC prerequisites, and
+>     non-writable fields will be excluded from the mapping input column.
+> (B) Pause and resolve the open questions first before I generate the design."
+
+Only continue to Phase F after the user chooses option A or clears all open items.
+
+---
+
+## Phase F — Output Context Block
+
+Return the following structured context for use in Step 3 of `intent-gen-confluence-design.mdc`.
+This block is internal — do not write it to the design file directly.
+
+```yaml
+sf_validation_context:
+  target_org: <devint2 | r2devint>
+  integration_user: <value>
+  validated_objects:
+    - object: <SObject>
+      status: <EXISTS | MISSING>
+  validated_fields:
+    - object: <SObject>
+      field: <FieldName>
+      type: <field_type>
+      picklist_values: [...]   # populated only for picklist/multipicklist
+      writable: <true | false>
+      external_id: <true | false>
+  open_questions_count: <N>
+  connector_recommendation: <"Salesforce Composite Connector 3.0" | "Salesforce Connector" | "Both">
+  prerequisites:
+    - "<Object>.<Field> must be deployed before release"
+```
+
+---
+
+## Rules for the generated design (carry forward to Step 3)
+
+These constraints apply to the design document generated after this validation:
+
+1. **Picklist values in examples** — use only values from `picklist_values` in Phase C1.
+   Never invent values.
+2. **Non-writable fields** — exclude from the `Field` column in §4.N.2 mapping tables.
+   Add a footnote: `* auto-populated by Salesforce — not sent by the integration`.
+3. **MISSING fields** — include in the mapping table with value `⚠ TBC — field not yet
+   deployed to org` in the Object/Notes column. Add as a prerequisite in Design Decisions.
+4. **Connector row (§1 row 19)** — use `connector_recommendation` from Phase F.
+5. **UPSERT operations** — name the confirmed External ID field explicitly in the
+   §4.N.2 orchestration step description.
+6. **Open Questions** — append the Phase E section verbatim as a `## Open Questions`
+   section at the end of the design document (after Design Decisions).

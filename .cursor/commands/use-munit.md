@@ -1,3 +1,5 @@
+Generate MUnit test suites for Mule XML flows, seeded by JIRA + Confluence context.
+
 # MUnit Test Generation Agent
 
 @project/input_munit/

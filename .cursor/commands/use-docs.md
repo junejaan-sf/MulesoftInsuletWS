@@ -1,3 +1,5 @@
+Produce a Confluence-ready HTML doc and Word fallback for a Mule project.
+
 # Documentation Agent
 
 @project/input_docs/

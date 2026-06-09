@@ -8,10 +8,12 @@ AI-assisted MuleSoft development workspace for Insulet. Each agent handles one p
 
 | Agent | Purpose | Command(s) |
 |-------|---------|------------|
-| **design** | Technical design from NotebookLM notebooks | — |
+| **requirements** | Agile integration user stories, Jira-ready | `/use-requirements` |
+| **design** | Solution/technical design (Confluence + Jira ready) from Jira, NotebookLM, SF validation | @mention design rules |
 | **raml** | RAML 1.0 API specification generation | `/use-raml` · `/use-raml-from-jira` · `/use-raml-to-exchange` |
 | **develop** | MuleSoft 4 application generation (flows, DataWeave, config) | `/use-develop` |
 | **munit** | MUnit 2.x test suite generation | `/use-munit` |
+| **testdata** | Live Salesforce test-data resolver for Postman seed payloads | @mention testdata rules |
 | **postman** | Postman v2.1 collection generation for HTTP APIs | `/use-postman` |
 | **documentation** | Confluence-ready API documentation | `/use-docs` |
 | **build** | Maven package + test build validator with auto-fix | `/use-build` |
@@ -31,9 +33,9 @@ AI-assisted MuleSoft development workspace for Insulet. Each agent handles one p
 ## Workflow
 
 ```
-[design]  →  raml  →  develop  →  munit    →  build  →  review
-                              ↘  postman  →  regression (Newman + SF validation)
-                              ↘  docs     →  review
+requirements  →  design  →  raml  →  develop  →  munit  →  build  →  review
+                                              ↘  testdata → postman → regression (Newman + SF validation)
+                                              ↘  docs     →  review
 ```
 
 Each agent runs in its own Cursor chat. Output from one agent becomes input to the next — you copy files manually between the `project/` folders as a deliberate review checkpoint.
@@ -44,9 +46,12 @@ Each agent runs in its own Cursor chat. Output from one agent becomes input to t
 
 | Agent | Drop inputs here | Pick outputs from here |
 |-------|-----------------|----------------------|
+| requirements | — (Jira ID / five inputs in chat) | `agents/requirements/output/` |
+| design | — (Jira / NotebookLM / docs via MCP) | `agents/design/output/` (+ NotebookLM drafts in `agents/design/examples/`) |
 | raml | `project/input_raml/` | `agents/raml/examples/{api-spec-name}/` |
 | develop | `project/input_develop/` | `project/output_develop/` |
 | munit | `project/input_munit/` | `project/output_munit/` |
+| testdata | — (reads `project/output_develop/`) | `project/input_postman/{api}-seed-payloads.json` |
 | postman | `project/input_postman/` | `agents/postman/examples/` |
 | documentation | `project/input_docs/` | `project/output_docs/` |
 | build | — (points at `project/output_develop/`) | `project/output_build/` |
@@ -74,12 +79,14 @@ Each agent runs in its own Cursor chat. Output from one agent becomes input to t
 ```
 MulesoftInsuletWS/
 ├── .cursor/
-│   └── commands/          ← slash commands for each agent (9 commands)
+│   └── commands/          ← slash commands for each agent (+ /list-commands)
 ├── agents/
-│   ├── design/            ← NotebookLM-driven design rules + examples
+│   ├── requirements/      ← Agile user-story generator (rules + output)
+│   ├── design/            ← solution-design generator + SF validation + NotebookLM rules
 │   ├── raml/              ← rules + examples (reference specs)
 │   ├── develop/           ← rules + templates (Mule app templates)
 │   ├── munit/             ← rules + examples
+│   ├── testdata/          ← live SF test-data resolver (Postman seed payloads)
 │   ├── postman/           ← rules + examples (generated collections)
 │   ├── documentation/     ← rules + examples
 │   ├── build/             ← rules + examples (Maven build validator)

@@ -1,3 +1,5 @@
+Fetch JIRA + Confluence, generate RAML, upgrade common-fragment-library, publish to Exchange.
+
 # RAML to Exchange Agent
 
 Full end-to-end workflow: fetches JIRA stories, generates/updates the RAML spec from Confluence design, upgrades common-fragment-library to the latest Exchange version, then publishes an editable asset via Design Center.

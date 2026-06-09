@@ -1,3 +1,5 @@
+Generate Mule flows, sub-flows, and DataWeave from JIRA story, Confluence design, and RAML.
+
 # MuleSoft App Development Agent
 
 @project/input_develop/

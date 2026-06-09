@@ -6,6 +6,7 @@ Type any command in a Cursor chat to activate the corresponding agent.
 
 | Command | Agent | Input |
 |---------|-------|-------|
+| `/use-requirements` | Requirements — Agile user story, Jira-ready | Jira ID / five inputs in chat |
 | `/use-raml` | RAML — from design doc or chat | `project/input_raml/` |
 | `/use-raml-from-jira` | RAML — from JIRA story + Confluence | Story ID in chat |
 | `/use-raml-to-exchange` | RAML — from JIRA + publish to Exchange | Story ID in chat |
@@ -15,6 +16,11 @@ Type any command in a Cursor chat to activate the corresponding agent.
 | `/use-postman` | Postman / Integration Testing | `project/input_postman/` |
 | `/use-docs` | Documentation | `project/input_docs/` |
 | `/use-review` | Code Review | — (point at project via @mention) |
+| `/list-commands` | List every workspace command + flag drift | — |
+
+> **Activated via @mention (no slash command):** the **design** agent
+> (`@agents/design/rules/intent-gen-confluence-design.mdc`) and the **testdata** resolver
+> (`@agents/testdata/rules/intent-gen-testdata.mdc`).
 
 ## How It Works
 
@@ -26,15 +32,18 @@ Type any command in a Cursor chat to activate the corresponding agent.
 ## Recommended Workflow
 
 ```
-/use-notebooklm → extract design examples from NotebookLM notebook
-/use-raml       → review RAML output
-/use-develop    → review Mule app
-/use-build      → validate package build (mvn clean package, auto-fix)
-/use-munit      → review test suites
-/use-build      → validate test run (mvn clean test, auto-fix)
-/use-postman    → review collection
-/use-docs       → review documentation
-/use-review     → final quality gate
+/use-requirements → draft the Agile user story (Jira-ready)
+@design rules     → solution design (Confluence/Jira) + SF validation
+@notebooklm rule  → (optional) extract design drafts from a NotebookLM notebook
+/use-raml         → review RAML output
+/use-develop      → review Mule app
+/use-build        → validate package build (mvn clean package, auto-fix)
+/use-munit        → review test suites
+/use-build        → validate test run (mvn clean test, auto-fix)
+@testdata rules   → resolve live SF test data into Postman seed payloads
+/use-postman      → review collection
+/use-docs         → review documentation
+/use-review       → final quality gate
 ```
 
 ## Shared Context: `project/input_develop/`
@@ -43,6 +52,7 @@ When `/use-develop` or `/use-raml-from-jira` runs, it saves `jira-*.md` and `con
 
 ## Design Examples: `agents/design/examples/`
 
+The design agent's NotebookLM extraction writes one draft per API to `agents/design/examples/{api-technical-name}.md`, and the solution-design generator writes finished design docs to `agents/design/output/`. @mention either when running `/use-raml` or `/use-develop` to provide richer business context than JIRA/Confluence alone.
 
 ## Tips
 
