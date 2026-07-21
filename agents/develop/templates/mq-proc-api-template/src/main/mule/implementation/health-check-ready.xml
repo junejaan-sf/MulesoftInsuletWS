@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	    health-check-ready-sub-flow
+	    Called by: GET /health-check flow (mq-proc-api-template.xml)
+
+	    scatter-gather checks each downstream dependency in parallel:
+	      - {downstream-sys-api} health-check endpoint
+	      - sfl-crm-persona-sys-api health-check endpoint
+
+	    Each route:
+	      1. Sets vars.targetApiParams using the dedicated healthcheck DWL
+	      2. Calls the corresponding named request flow (reuses common-connectivity.xml)
+
+	    p-set-readiness-response-success.dwl aggregates scatter-gather results
+	    into the standard readiness response shape.
+
+	    IMPORTANT — Replace {downstream-sys-api} with actual system API name.
+	-->
+	<sub-flow name="health-check-ready-sub-flow" doc:name="health-check-ready-sub-flow">
+		<scatter-gather doc:name="Send request to all downstream systems">
+			<route>
+				<try doc:name="Try">
+					<ee:transform doc:name="Set {downstream-sys-api} Healthcheck Params">
+						<ee:message />
+						<ee:variables>
+							<ee:set-variable resource="dwls/v-targetApiParams-{downstream-sys-api}-healthcheck.dwl" variableName="targetApiParams" />
+						</ee:variables>
+					</ee:transform>
+					<flow-ref doc:name="Flow Reference to {downstream-sys-api}-request-flow"
+						name="{downstream-sys-api}-request-flow" />
+					<error-handler>
+						<on-error-continue type="ANY" doc:name="On Error Continue">
+							<set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    apiName: p('{downstream-sys-api}.name'),
+    status: p('message.systemDown')
+}]" mimeType="application/json" doc:name="Set API Status" />
+						</on-error-continue>
+					</error-handler>
+				</try>
+			</route>
+
+			<route>
+				<try doc:name="Try">
+					<ee:transform doc:name="Set Persona Healthcheck Params">
+						<ee:message />
+						<ee:variables>
+							<ee:set-variable resource="dwls/v-targetApiParams-sfl-crm-persona-sys-api-healthcheck.dwl" variableName="targetApiParams" />
+						</ee:variables>
+					</ee:transform>
+					<flow-ref doc:name="Flow Reference to sfl-crm-persona-sys-api-request-flow"
+						name="sfl-crm-persona-sys-api-request-flow" />
+					<error-handler>
+						<on-error-continue type="ANY" doc:name="On Error Continue">
+							<set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    apiName: p('sfl-crm-persona-sys-api.name'),
+    status: p('message.systemDown')
+}]" mimeType="application/json" doc:name="Set API Status" />
+						</on-error-continue>
+					</error-handler>
+				</try>
+			</route>
+		</scatter-gather>
+
+		<ee:transform doc:name="Set Readiness Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-readiness-response-success.dwl" />
+			</ee:message>
+		</ee:transform>
+	</sub-flow>
+
+</mule>

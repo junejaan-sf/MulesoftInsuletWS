@@ -1,0 +1,37 @@
+---
+description: Ensures Maven settings.xml includes required Insulet/MuleSoft servers and repositories for Exchange, Mule EE, and EU Exchange
+globs: ["**/settings.xml", "**/pom.xml"]
+alwaysApply: false
+---
+
+# Maven settings.xml Standards
+
+## When to Apply
+
+When **creating**, **scaffolding**, or **reviewing** Mule projects, or when `settings.xml` is **missing** or **incomplete**, ensure it includes the required Maven configuration for Anypoint Exchange and Mule EE dependencies.
+
+## Required Configuration
+
+The project `settings.xml` (or user `~/.m2/settings.xml`) **must** include:
+
+### Servers
+
+- **anypoint-exchange-v3** — Connected App auth: `~~~Client~~~` / `${connectedapp.client.id}~?~${connectedapp.client.secret}`
+- **eu-anypoint-exchange-v3** — Same credentials for EU Exchange
+- **mulesoft-release-ee** — Enterprise auth: `${enterprise.username}` / `${enterprise.password}`
+
+### Repositories (profile `deploy-to-exchange`, activeByDefault)
+
+- **mulesoft-release-ee** — `https://repository.mulesoft.org/nexus-ee/content/repositories/releases-ee/`
+- **mulesoft-releases** — `https://repository.mulesoft.org/releases/`
+- **anypoint-exchange-v3** — `https://maven.anypoint.mulesoft.com/api/v3/maven`
+- **eu-anypoint-exchange-v3** — `https://maven.eu1.anypoint.mulesoft.com/api/v3/maven`
+
+## Action
+
+If `settings.xml` is missing or lacks any of the above servers/repositories, add or update it using the template at workspace root: `settings.xml`.
+
+## Reference
+
+- No hardcoded Exchange credentials in POM — use `settings.xml` (see `agents/review/rules/review-pom-maven-standards.mdc`)
+- Credentials are provided via environment variables or CI/CD: `connectedapp.client.id`, `connectedapp.client.secret`, `enterprise.username`, `enterprise.password`

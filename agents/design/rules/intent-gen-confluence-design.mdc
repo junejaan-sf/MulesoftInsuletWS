@@ -1,0 +1,268 @@
+---
+description: >-
+  Hybrid solution-design generator for MuleSoft APIs. Auto-pulls context from Jira,
+  NotebookLM, and external API docs; confirms gaps; then writes a single Markdown
+  design document matching Insulet canonical pages (aspn-sys-api, usps-sys-api).
+  Triggers on "confluence design <api-name>" or "solution design <JIRA-ID>".
+globs:
+alwaysApply: false
+---
+
+# Solution Design Generator
+
+**Persona:** Expert MuleSoft Integration Architect.
+**Reference standards:** `agents/design/rules/design-standards-reference.mdc` (read silently before generating — do not surface implementation details like DWL file names, flow names, or RAML in the output document).
+
+**Available MCP tools:**
+- Atlassian (read-only): `jira_get_issue`, `jira_search`, `confluence_get_page`
+- NotebookLM (read): `notebook_list`, `notebook_query`
+- Web: `WebFetch`
+- Salesforce: `salesforce` (`@salesforce/mcp` → devint2) or `sf-R2` (`@salesforce/mcp` → r2devint)
+
+> The Atlassian MCP cannot write to Confluence. Output is a local Markdown file.
+> Report the file path — the user can copy-paste content into Confluence or Jira directly.
+
+---
+
+## Step 0 — Scope
+
+Ask the user: **one endpoint** or the **whole API**?
+- One endpoint → generate only that endpoint's 4.N section; mark others as `TBC`.
+
+---
+
+## Step 1 — Gather Context (run in parallel)
+
+**1a. Jira** — `jira_get_issue` on the feature story + the sys-api story. If only one ID given, `jira_search` for the linked child story.
+
+**1b. NotebookLM** — `notebook_list` → match notebook → `notebook_query`:
+- Q1: Business purpose and integration flow.
+- Q2: Endpoints, HTTP methods, input fields (name/type/required/validation), request and response schemas.
+- Q3: Downstream systems, field mappings (source → target), auth/token handling, orchestration order.
+- Q4: Business rules, validations, error codes, edge cases.
+If auth expired, note the gap and continue.
+
+**1c. External docs** — `WebFetch` any reference links the user provides. Extract auth model, endpoint paths, request/response schemas, error codes.
+
+---
+
+## Step 2 — Confirm Gaps
+
+Summarise what was extracted. Ask to fill only what is missing or uncertain:
+- API technical name + business name
+- Business domain and API type
+- Endpoint path(s) + HTTP method(s) in scope
+- Business logic summary
+- Caller layer and downstream system for the diagram
+
+---
+
+## Step 2.5 — Salesforce Pre-Validation (conditional)
+
+Skip this step if **no endpoint in scope** reads from or writes to Salesforce.
+
+If any endpoint targets Salesforce: read and execute `agents/design/rules/sf-design-validation.mdc`
+in full before proceeding to Step 3. Pass the mapping file paths and the list of in-scope endpoints
+as inputs. **Do not generate the design document until Phase E confirmation is received.**
+
+---
+
+## Step 3 — Generate
+
+Write one file: `agents/design/output/{api-technical-name}-design.md`
+
+Use standard **GitHub-Flavored Markdown**:
+- Tables: GFM pipe tables (`| col | col |` with `|---|---|` separator row)
+- Code / JSON: fenced code blocks with language hint (` ```json `)
+- Mermaid diagrams: fenced code blocks with ` ```mermaid ` tag
+- Headings: `##` for top-level sections, `###` for sub-sections, `####` for per-endpoint blocks
+- Horizontal rules (`---`) between major sections
+
+**If Step 2.5 ran, carry forward the SF validation context into the document:**
+- **§1 row 19** (Other Libraries and Connectors): Use `connector_recommendation` from Phase F of the SF validation — `Salesforce Composite Connector 3.0`, `Salesforce Connector`, or both.
+- **§4.N.1 Input examples**: Use only picklist values confirmed in Phase C1 of the SF validation. Never invent picklist values. Mark any non-writable field with a footnote `* auto-populated by Salesforce — not sent by the integration`.
+- **§4.N.2 Mapping table**: Use only validated field names. For any MISSING field write `⚠ TBC — field not yet deployed to org` in the Notes column.
+- **§4.N.2 Orchestration steps**: For UPSERT operations, name the confirmed External ID field explicitly in the step description.
+- **Design Decisions table**: Append one row per open question from Phase E (missing fields, non-writable fields, composite issues).
+- **Open Questions section**: Append the Phase E report verbatim as a `## Open Questions` section at the end of the document.
+
+---
+
+## Document Structure
+
+Produce **exactly these four sections** — no more, no less. Do NOT include RAML,
+DataWeave, flow XML, or any implementation code anywhere in the document.
+
+---
+
+### 1. Application Overview
+
+Single full-width GFM table. Headers: **Title** | **Description**. Exactly **21 rows**
+in this order — never reorder, never drop, never add rows:
+
+| # | Title | How to populate |
+|---|---|---|
+| 1 | Application Technical Name | `{name}-{layer}-api` — no regional prefix (e.g. `payments-sys-api`) |
+| 2 | Application Business Name | Human-readable Title Case (e.g. `Payments System API`) |
+| 3 | Business Domain | Domain from Jira / notebook (e.g. `Order Management`) |
+| 4 | Available Versions | `1.0` for new APIs |
+| 5 | Purpose of API | 1–2 sentences: what the API does and why |
+| 6 | Mule Application Type | `API` for REST; `MQ Consumer` for async |
+| 7 | API Type | `System` / `Process` / `Experience` |
+| 8 | GitHub Repo URL | TBC |
+| 9 | Healthcheck Endpoints | `GET /api/ping` `GET /api/health-check` |
+| 10 | Exchange Specification URL | TBC |
+| 11 | Monitoring Dashboard URL | Anypoint Monitoring URL: TBC — Datadog dashboard URL: TBC |
+| 12 | API Manager URL | TBC (auto-discovery IDs filled post-deployment) |
+| 13 | Runtime URLs | `dev: https://dev2.na.internal.insuletintegrations.com/{layer}/{name}/v1` (repeat for qa/uat/prod) |
+| 14 | Postman Collection File | TBC |
+| 15 | Properties Configured | All defined properties can be found in the config.properties and config-{env}.properties files in the Github repo |
+| 16 | Azure Vault Keys and Credentials Details | List key names only (never values). Always include `global-logger-encryption-key`. All keys and the corresponding secrets can be found at: Azure Key Vault |
+| 17 | Depends on Mule Apps/APIs | Downstream APIs or external systems; `None` if direct external call only |
+| 18 | Insulet Connectors/Libraries Used | Custom Logger Connector (module-logger), API Error Handler (api-error-handler), Notification Connector (mule-notification-connector), log4j-datadog-appender |
+| 19 | Other Libraries and Connectors Used | HTTP Connector, APIKit Module, + any external connectors (e.g. Object Store Connector). **If SF validation (Step 2.5) ran:** use the connector recommendation from Phase F — `Salesforce Composite Connector 3.0`, `Salesforce Connector`, or both. |
+| 20 | API Manager Policies Applied | `Client ID Enforcement` minimum; add others if known |
+| 21 | Parent-POM | TBC |
+
+---
+
+### 2. Non-Functional Requirements
+
+Single GFM table. Headers: **Type** | **Description**. Exactly **5 rows** in order:
+
+| Type | How to populate |
+|---|---|
+| Authentication | Inbound policy (e.g. `Client ID Enforcement`). For outbound: describe auth mechanism. |
+| Response Time | `TBC` until sized; otherwise `95% within X seconds` |
+| Number of transactions to be processed | `TBC` |
+| Spike Control | `Yes` or `No`. If Yes: `Yes — N req/sec burst` |
+| Rate-Limiting SLA | `Yes` or `No`. If Yes: `Yes — N req/min` |
+
+---
+
+### 3. High-Level Architecture
+
+Add a Mermaid `flowchart TD` diagram showing:
+- Caller (Salesforce / Process API / Experience API)
+- This API as the orchestrator
+- Downstream / external system(s)
+
+Number every block: **Step 0, Step 1, Step 2 …** First block = entry point. Show
+auth/token acquisition and Object Store cache checks (diamond nodes) when present.
+Do NOT add blocks for logging, request-context capture, or correlation-ID propagation —
+those are cross-cutting; describe in 4.N.2 prose only.
+
+Markdown format:
+
+````markdown
+```mermaid
+flowchart TD
+    Step0[...] --> Step1[...]
+    ...
+```
+````
+
+---
+
+### 4. Interface Specifications
+
+#### Resources table
+
+GFM table: `Resource Name | Supported Methods | Description` — all in-scope endpoints
+plus health checks.
+
+#### 4.N — per endpoint (repeat for each; one section if scope = one endpoint)
+
+**4.N.1 Input**
+
+GFM table: `Field | Type | Required? | Description`
+- One row per field. Never club fields.
+- All field names must be **camelCase** (e.g. `merchantCustomerId`, `expirationDate`).
+- `Required?` = `Yes` or `No`.
+- `Description` = type constraints, format, allowed values, business rules.
+- **If SF validation (Step 2.5) ran:** use only picklist values confirmed in Phase C — never invent picklist values. Flag any non-writable field with a footnote `* auto-populated by Salesforce — not sent by MuleSoft`.
+- Follow with an example request JSON payload — all field names **camelCase**:
+
+```json
+{
+  "merchantCustomerId": "0033x00000ABC123",
+  "email": "patient@example.com"
+}
+```
+
+**4.N.2 Backend Mapping and Logic**
+
+Numbered orchestration steps (Step 0, Step 1, …) matching 3. For each
+downstream/external call include:
+
+GFM mapping table: `Field | Object | Type | Value Passed`
+- `Value Passed` prefixed with the inbound payload alias (e.g. `SF.merchantCustomerId`).
+- Do NOT mention DWL file names, flow names, sub-flow names, or RAML.
+- **If SF validation (Step 2.5) ran:** use only validated field names. For any MISSING field write `⚠ TBC — field not yet deployed to org` in the Object column. Where the SF validation confirmed an UPSERT pattern, name the confirmed External ID field in the step description.
+
+For Object Store / credential caching patterns include: key name, TTL, cache-hit/miss
+logic, re-fetch source, retry behaviour.
+
+Cross-cutting note (write once per endpoint, not in the diagram):
+> At flow entry, a `requestContext` variable captures inbound HTTP attributes and
+> source/target system labels. Entry and exit are logged with `module-logger`
+> (`FLOW_START` / `FLOW_END`, INFO, no payload). These are omitted from the
+> architecture diagram for clarity.
+
+**4.N.3 Output / Acknowledgement**
+
+**HTTP Status Codes** — use exactly these codes based on the HTTP method:
+
+| Method | Success | Client Errors | Server Error |
+|---|---|---|---|
+| GET | 200 | 400, 401, 404 | 500 |
+| POST (create) | 201 | 400, 401 | 500 |
+| PUT / PATCH | 200 | 400, 401 | 500 |
+| DELETE | 204 | 400, 401, 404 | 500 |
+
+Add 502 when the API calls an external system that can fail. Add 409 for
+duplicate-resource conflicts (POST only).
+
+GFM status table: `HTTP Status | Reason | Trigger / Developer Notes`
+
+**Success response example** (camelCase fields):
+```json
+{
+  "customerProfileId": "527262"
+}
+```
+
+**Error response** — always use this fixed format, never deviate:
+```json
+{
+  "correlationId": "a1b2c3d4-1234-5678-abcd-ef1234567890",
+  "errorCode": "NAMESPACE:ERROR_CODE",
+  "description": "Human-readable description of the failure.",
+  "errorDetails": [
+    {
+      "message": "Downstream or validation error message.",
+      "code": "E00039"
+    }
+  ]
+}
+```
+
+All field names in request and response examples must be **camelCase**.
+Never use snake_case or PascalCase for JSON field names.
+
+---
+
+## Step 4 — Report
+
+After writing the file:
+- **File:** `agents/design/output/{api-technical-name}-design.md`
+- Count of `TBC` fields remaining
+- **If SF validation (Step 2.5) ran:** append one row to the Design Decisions table for each Open Question from Phase E (missing fields, non-writable fields, composite graph issues).
+- **To use in Confluence:** open the file → copy section content → paste into the
+  Confluence page editor. Tables, code blocks, and Mermaid diagrams render natively
+  in Confluence's Markdown/wiki editor or via the Markdown macro.
+- **To use in Jira:** paste the relevant sections directly into the story description
+  field — Jira renders GFM Markdown natively.
+- **Jira summary:** Provide a 3–5 bullet plain-text summary (no RAML, no DataWeave,
+  no code) that the user can paste as a comment on the Jira story. Include the design
+  doc file path and key design decisions only.

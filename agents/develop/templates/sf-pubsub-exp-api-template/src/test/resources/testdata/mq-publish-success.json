@@ -1,0 +1,5 @@
+{
+  "messageId": "mq-msg-001",
+  "destination": "dev-replace-with-queue-name",
+  "status": "PUBLISHED"
+}

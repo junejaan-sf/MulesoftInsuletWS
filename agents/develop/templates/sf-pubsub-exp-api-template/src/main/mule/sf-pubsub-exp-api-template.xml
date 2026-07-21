@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:tracing="http://www.mulesoft.org/schema/mule/tracing"
+	xmlns:salesforce-pub-sub="http://www.mulesoft.org/schema/mule/salesforce-pub-sub"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/salesforce-pub-sub http://www.mulesoft.org/schema/mule/salesforce-pub-sub/current/mule-salesforce-pub-sub.xsd
+http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+http://www.mulesoft.org/schema/mule/tracing http://www.mulesoft.org/schema/mule/tracing/current/mule-tracing.xsd">
+
+	<!-- =========================================================
+	     HTTP Listener + APIKit Router
+	     Exposes /ping and /health-check endpoints.
+	     ========================================================= -->
+	<flow name="sf-pubsub-exp-api-template-main" doc:name="sf-pubsub-exp-api-template-main">
+		<http:listener config-ref="api-listener_config" path="${http.basePath}" doc:name="HTTP Listener">
+			<http:response statusCode="#[vars.httpStatus default 200]">
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:response>
+			<http:error-response statusCode="#[vars.httpStatus default 500]">
+				<http:body><![CDATA[#[payload]]]></http:body>
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:error-response>
+		</http:listener>
+		<ee:transform doc:name="Set requestContext">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+			</ee:variables>
+		</ee:transform>
+		<apikit:router config-ref="sf-pubsub-exp-api-template_config" doc:name="APIkit Router" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+	<!-- =========================================================
+	     Ping (Liveness) Endpoint
+	     GET /ping — no outbound dependency, returns alive status.
+	     ========================================================= -->
+	<flow name="get:\ping:sf-pubsub-exp-api-template_config" doc:name="get:\ping">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="GET /ping"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<ee:transform doc:name="DW Set Liveness Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-liveness-response.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="GET /ping"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     Health Check (Readiness) Endpoint
+	     GET /health-check — returns readiness status.
+	     No downstream HTTP dependency for this pattern; extend if needed.
+	     ========================================================= -->
+	<flow name="get:\health-check:sf-pubsub-exp-api-template_config" doc:name="get:\health-check">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY"
+			config-ref="custom-logger-connector_config"
+			message="GET /health-check"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<ee:transform doc:name="DW Set Readiness Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-readiness-response.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload doc:name="LOG EXIT"
+			config-ref="custom-logger-connector_config"
+			message="GET /health-check"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     PATTERN A: Subscribe Channel Listener (Salesforce PubSub / gRPC)
+	     Connector: mule4-salesforce-pubsub-connector:1.2.0
+	     ReplayId: persisted to Object Store (pub-sub-object-store_config)
+	     Reference: sfl-event-to-mq-api-template / subscribe-channel-event-sub-flow
+	     ========================================================= -->
+	<flow name="sfl-subscribe-channel-event-listener-flow" doc:name="sfl-subscribe-channel-event-listener-flow">
+		<salesforce-pub-sub:subscribe-channel-listener
+			channelName="${sfl.channelName}"
+			doc:name="Subscribe Channel Listener"
+			config-ref="salesforce-pubsub_config"
+			eventBatchSize="${sfl.pubSub.batchSize}">
+			<salesforce-pub-sub:replay-option>
+				<salesforce-pub-sub:replay-id-from-object-store
+					osName="${sfl.pubSub.os.name}"
+					osKey="${sfl.pubSub.os.key}" />
+			</salesforce-pub-sub:replay-option>
+		</salesforce-pub-sub:subscribe-channel-listener>
+		<flow-ref doc:name="Flow Reference to subscribe-channel-event-sub-flow"
+			name="subscribe-channel-event-sub-flow" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+	<!-- =========================================================
+	     PATTERN B: Replay Channel Listener (Salesforce Streaming / CometD)
+	     Connector: mule-salesforce-connector (classic)
+	     ReplayId: managed automatically via FROM_LAST_REPLAY_ID — no Object Store needed.
+	     Reference: na-sfl-exp-api / aspn-outbound-events pattern
+	     ========================================================= -->
+	<flow name="sfl-replay-channel-event-listener-flow" doc:name="sfl-replay-channel-event-listener-flow">
+		<salesforce:replay-channel-listener
+			doc:name="Replay Channel Listener"
+			config-ref="salesforceConfig"
+			replayOption="FROM_LAST_REPLAY_ID"
+			streamingChannel="${sfl.streamingChannel}" />
+		<flow-ref doc:name="Flow Reference to replay-channel-event-sub-flow"
+			name="replay-channel-event-sub-flow" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+</mule>

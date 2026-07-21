@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+	xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+		http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+	<!--
+		update-record MUnit Test Suite — PUT /providers/records/{id}
+		Demonstrates the standard test pattern for a proc-API operation.
+
+		Naming convention: {api-prefix}-{test-description}
+		Replace "tmpl" with the actual 4-6 character API prefix (e.g., "acct", "lead").
+
+		Notes:
+		- vars.requestContext is set manually — http-proc-api-template-main is NOT called.
+		- flow-ref mocks for primary SAPI call (uses target=) require BOTH name AND doc:name attributes.
+		- http:request mock covers all remaining downstream calls (secondary, tertiary, transactions-errors).
+	-->
+	<munit:config name="update-record-test-suite" />
+
+	<!--
+		TEST 1: Full Success
+		PUT /providers/records/{id} with all optional fields present.
+		Both scatter-gather routes execute (Route A: secondary-operation, Route B: tertiary-operation).
+	-->
+	<munit:test name="tmpl-update-record-full-success"
+		description="PUT /providers/records/(id) - Full success: primary SAPI call + both scatter-gather routes execute"
+		tags="SUCCESS">
+
+		<munit:behavior>
+			<!-- Mock primary SAPI call (uses target= attribute — match BOTH name and doc:name) -->
+			<munit-tools:mock-when processor="mule:flow-ref" doc:name="Mock Primary SAPI Call">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="name" whereValue="common-http-request-flow" />
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="common-http-request-flow (primary-sapi PUT /providers/records)" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/update-record/technical-outbound/primary-sapi-success-response.json')]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock all remaining http:request calls (secondary, tertiary, transactions-errors POST) -->
+			<munit-tools:mock-when processor="http:request" doc:name="Mock HTTP Request to Downstream SAPI">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="HTTP Request to Downstream SAPI" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- {}]" />
+					<munit-tools:attributes value="#[{statusCode: 200}]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<munit:set-event doc:name="Set Full Success Request">
+				<munit:payload
+					value="#[output application/json --- readUrl('classpath://testdata/update-record/business-inbound/update-record-full-success-request.json')]"
+					mediaType="application/json" />
+				<munit:attributes value="#[{
+					uriParams: { 'id': 'REC001' }
+				}]" />
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- {
+						headers: { 'content-type': 'application/json', 'sourceSystem': 'http-proc-api-template', 'targetSystem': 'primary-sapi' },
+						queryParams: {},
+						uriParams: { 'id': 'REC001' },
+						originalPayload: readUrl('classpath://testdata/update-record/business-inbound/update-record-full-success-request.json', 'application/json'),
+						requestPath: '/api/v1/providers/records/REC001',
+						sourceSystem: 'http-proc-api-template',
+						targetSystem: 'primary-sapi'
+					}]" />
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="Flow-ref to update-record endpoint"
+				name="put:\providers\records\(id):application\json:http-proc-api-template-spec-config" />
+		</munit:execution>
+
+		<munit:validation>
+			<munit-tools:assert-that expression="#[vars.httpStatus]"
+				is="#[MunitTools::equalTo(200)]"
+				message="Expected HTTP status 200"
+				doc:name="Assert HTTP Status 200" />
+
+			<munit-tools:assert-equals doc:name="Assert Response Payload"
+				actual="#[payload]"
+				expected="#[output application/json --- readUrl('classpath://testdata/update-record/business-outbound/update-record-success-response.json')]" />
+
+			<munit-tools:verify-call processor="mule:flow-ref" atLeast="1" doc:name="Verify Secondary Sub-flow Called">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="name" whereValue="secondary-operation-sub-flow" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+
+			<munit-tools:verify-call processor="mule:flow-ref" atLeast="1" doc:name="Verify Tertiary Sub-flow Called">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="name" whereValue="tertiary-operation-sub-flow" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+		</munit:validation>
+	</munit:test>
+
+	<!--
+		TEST 2: Skip Secondary Route (optionalItems absent)
+		Scatter-gather Route A is skipped because optionalItems is absent/empty.
+		Only the primary SAPI call and Route B (tertiary-operation) execute.
+	-->
+	<munit:test name="tmpl-update-record-skip-secondary-success"
+		description="PUT /providers/records/(id) - Skips secondary route when optionalItems is absent"
+		tags="SUCCESS">
+
+		<munit:behavior>
+			<munit-tools:mock-when processor="mule:flow-ref" doc:name="Mock Primary SAPI Call">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="name" whereValue="common-http-request-flow" />
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="common-http-request-flow (primary-sapi PUT /providers/records)" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/update-record/technical-outbound/primary-sapi-success-response.json')]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<munit-tools:mock-when processor="http:request" doc:name="Mock HTTP Request to Downstream SAPI">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="HTTP Request to Downstream SAPI" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- {}]" />
+					<munit-tools:attributes value="#[{statusCode: 200}]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<munit:set-event doc:name="Set Skip Secondary Request">
+				<munit:payload
+					value="#[output application/json --- readUrl('classpath://testdata/update-record/business-inbound/update-record-skip-secondary-request.json')]"
+					mediaType="application/json" />
+				<munit:attributes value="#[{
+					uriParams: { 'id': 'REC001' }
+				}]" />
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- {
+						headers: { 'content-type': 'application/json', 'sourceSystem': 'http-proc-api-template', 'targetSystem': 'primary-sapi' },
+						queryParams: {},
+						uriParams: { 'id': 'REC001' },
+						originalPayload: readUrl('classpath://testdata/update-record/business-inbound/update-record-skip-secondary-request.json', 'application/json'),
+						requestPath: '/api/v1/providers/records/REC001',
+						sourceSystem: 'http-proc-api-template',
+						targetSystem: 'primary-sapi'
+					}]" />
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="Flow-ref to update-record endpoint"
+				name="put:\providers\records\(id):application\json:http-proc-api-template-spec-config" />
+		</munit:execution>
+
+		<munit:validation>
+			<munit-tools:assert-that expression="#[vars.httpStatus]"
+				is="#[MunitTools::equalTo(200)]"
+				message="Expected HTTP status 200"
+				doc:name="Assert HTTP Status 200" />
+
+			<!-- secondary-operation-sub-flow must NOT be called when optionalItems is absent -->
+			<munit-tools:verify-call processor="mule:flow-ref" times="0" doc:name="Verify Secondary Sub-flow NOT Called">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="name" whereValue="secondary-operation-sub-flow" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+		</munit:validation>
+	</munit:test>
+
+	<!--
+		TEST 3: Primary SAPI Connectivity Error (503)
+		Primary SAPI flow-ref is mocked to throw APP:CONNECTIVITY_FAILED.
+		Global error handler on-error-continue catches it → customErrors returns 503.
+		http:request is mocked to return 200 (covers async transactions-errors POST).
+	-->
+	<munit:test name="tmpl-update-record-connectivity-error"
+		description="PUT /providers/records/(id) - Primary SAPI connectivity failure returns 503"
+		tags="ERROR">
+
+		<munit:behavior>
+			<munit-tools:mock-when processor="mule:flow-ref" doc:name="Mock Primary SAPI Connectivity Error">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="name" whereValue="common-http-request-flow" />
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="common-http-request-flow (primary-sapi PUT /providers/records)" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="APP:CONNECTIVITY_FAILED" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock the transactions-errors POST in the async error flow -->
+			<munit-tools:mock-when processor="http:request" doc:name="Mock HTTP Request Transactions Errors POST">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="HTTP Request to Downstream SAPI" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- { id: 'TRX-001' }]" />
+					<munit-tools:attributes value="#[{statusCode: 200}]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<munit:set-event doc:name="Set Connectivity Error Request">
+				<munit:payload
+					value="#[output application/json --- readUrl('classpath://testdata/update-record/business-inbound/update-record-full-success-request.json')]"
+					mediaType="application/json" />
+				<munit:attributes value="#[{
+					uriParams: { 'id': 'REC001' }
+				}]" />
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- {
+						headers: { 'content-type': 'application/json', 'sourceSystem': 'http-proc-api-template', 'targetSystem': 'primary-sapi' },
+						queryParams: {},
+						uriParams: { 'id': 'REC001' },
+						originalPayload: readUrl('classpath://testdata/update-record/business-inbound/update-record-full-success-request.json', 'application/json'),
+						requestPath: '/api/v1/providers/records/REC001',
+						sourceSystem: 'http-proc-api-template',
+						targetSystem: 'primary-sapi'
+					}]" />
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="Flow-ref to update-record endpoint"
+				name="put:\providers\records\(id):application\json:http-proc-api-template-spec-config" />
+		</munit:execution>
+
+		<munit:validation>
+			<munit-tools:assert-that expression="#[vars.httpStatus]"
+				is="#[MunitTools::equalTo(503)]"
+				message="Expected HTTP status 503 Service Unavailable"
+				doc:name="Assert HTTP Status 503" />
+
+			<munit-tools:assert-that expression="#[payload.error.code]"
+				is="#[MunitTools::equalTo(503)]"
+				message="Expected error code 503"
+				doc:name="Assert Error Code 503" />
+
+			<munit-tools:assert-that expression="#[payload.error.reason]"
+				is="#[MunitTools::equalTo('Service Unavailable')]"
+				message="Expected reason Service Unavailable"
+				doc:name="Assert Error Reason Service Unavailable" />
+		</munit:validation>
+	</munit:test>
+
+	<!--
+		TEST 4: Primary SAPI Bad Request (400) — non-retryable on-error-continue path
+		HTTP:BAD_REQUEST is NOT in ${httpErrors}, so on-error-continue fires inside try block.
+		success=false → connectivity-error-handler raises APP:CONNECTIVITY_FAILED.
+		Global error handler resolves APP:CONNECTIVITY_FAILED via vars.errorDetails (HTTP:BAD_REQUEST) → 400.
+	-->
+	<munit:test name="tmpl-update-record-bad-request-error"
+		description="PUT /providers/records/(id) - Primary SAPI 400 Bad Request exercising on-error-continue in common-connectivity"
+		tags="ERROR">
+
+		<munit:behavior>
+			<munit-tools:mock-when processor="http:request" doc:name="Mock HTTP Bad Request from Primary SAPI">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="HTTP Request to Downstream SAPI" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="HTTP:BAD_REQUEST" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<munit:set-event doc:name="Set Bad Request">
+				<munit:payload
+					value="#[output application/json --- readUrl('classpath://testdata/update-record/business-inbound/update-record-full-success-request.json')]"
+					mediaType="application/json" />
+				<munit:attributes value="#[{
+					uriParams: { 'id': 'REC001' }
+				}]" />
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- {
+						headers: { 'content-type': 'application/json', 'sourceSystem': 'http-proc-api-template', 'targetSystem': 'primary-sapi' },
+						queryParams: {},
+						uriParams: { 'id': 'REC001' },
+						originalPayload: readUrl('classpath://testdata/update-record/business-inbound/update-record-full-success-request.json', 'application/json'),
+						requestPath: '/api/v1/providers/records/REC001',
+						sourceSystem: 'http-proc-api-template',
+						targetSystem: 'primary-sapi'
+					}]" />
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="Flow-ref to update-record endpoint"
+				name="put:\providers\records\(id):application\json:http-proc-api-template-spec-config" />
+		</munit:execution>
+
+		<munit:validation>
+			<munit-tools:assert-that expression="#[vars.httpStatus]"
+				is="#[MunitTools::equalTo(400)]"
+				message="Expected HTTP status 400 Bad Request"
+				doc:name="Assert HTTP Status 400" />
+
+			<munit-tools:assert-that expression="#[payload.error.code]"
+				is="#[MunitTools::equalTo(400)]"
+				message="Expected error code 400"
+				doc:name="Assert Error Code 400" />
+
+			<munit-tools:assert-that expression="#[payload.error.reason]"
+				is="#[MunitTools::equalTo('Bad Request')]"
+				message="Expected reason Bad Request"
+				doc:name="Assert Error Reason Bad Request" />
+		</munit:validation>
+	</munit:test>
+
+</mule>

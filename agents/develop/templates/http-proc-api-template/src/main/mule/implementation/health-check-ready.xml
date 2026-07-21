@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+		Readiness sub-flow: scatter-gather pings all downstream SAPIs in parallel.
+		Each route normalises the result to { apiName, status: "up" | "down" }.
+		p-set-readiness-response-success.dwl aggregates into the standard readiness envelope.
+
+		Add or remove scatter-gather routes to match the actual number of downstream SAPIs.
+		Rename "primary-sapi" and "secondary-sapi" to your actual SAPI names.
+	-->
+	<sub-flow name="healthcheck-ready-sub-flow" doc:name="healthcheck-ready-sub-flow">
+		<scatter-gather doc:name="Send request to all downstream systems">
+
+			<!-- Route 1: primary-sapi health check -->
+			<route>
+				<try doc:name="Try">
+					<ee:transform doc:name="Set primary-sapi healthcheck params">
+						<ee:message />
+						<ee:variables>
+							<ee:set-variable resource="dwls/v-targetApiParams-primary-sapi-healthcheck.dwl" variableName="targetApiParams" />
+						</ee:variables>
+					</ee:transform>
+					<flow-ref name="common-http-request-flow"
+						doc:name="Flow Reference to common-http-request-flow (primary-sapi health-check)" />
+					<ee:transform doc:name="Normalize success response">
+						<ee:message>
+							<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	apiName: "primary-sapi",
+	status: payload.status default p('message.systemUp')
+}]]></ee:set-payload>
+						</ee:message>
+					</ee:transform>
+					<error-handler>
+						<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+							<ee:transform doc:name="Set API status down">
+								<ee:message>
+									<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	apiName: "primary-sapi",
+	status: p('message.systemDown')
+}]]></ee:set-payload>
+								</ee:message>
+							</ee:transform>
+						</on-error-continue>
+					</error-handler>
+				</try>
+			</route>
+
+			<!-- Route 2: secondary-sapi health check -->
+			<route>
+				<try doc:name="Try">
+					<ee:transform doc:name="Set secondary-sapi healthcheck params">
+						<ee:message />
+						<ee:variables>
+							<ee:set-variable resource="dwls/v-targetApiParams-secondary-sapi-healthcheck.dwl" variableName="targetApiParams" />
+						</ee:variables>
+					</ee:transform>
+					<flow-ref name="common-http-request-flow"
+						doc:name="Flow Reference to common-http-request-flow (secondary-sapi health-check)" />
+					<ee:transform doc:name="Normalize success response">
+						<ee:message>
+							<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	apiName: "secondary-sapi",
+	status: payload.status default p('message.systemUp')
+}]]></ee:set-payload>
+						</ee:message>
+					</ee:transform>
+					<error-handler>
+						<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+							<ee:transform doc:name="Set API status down">
+								<ee:message>
+									<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	apiName: "secondary-sapi",
+	status: p('message.systemDown')
+}]]></ee:set-payload>
+								</ee:message>
+							</ee:transform>
+						</on-error-continue>
+					</error-handler>
+				</try>
+			</route>
+
+			<!-- Route 3: sfl-crm-persona-sys-api health check (error logging SAPI — always include) -->
+			<route>
+				<try doc:name="Try">
+					<ee:transform doc:name="Set sfl-crm-persona-sys-api healthcheck params">
+						<ee:message />
+						<ee:variables>
+							<ee:set-variable resource="dwls/v-targetApiParams-sfl-crm-persona-sys-api-healthcheck.dwl" variableName="targetApiParams" />
+						</ee:variables>
+					</ee:transform>
+					<flow-ref name="common-http-request-flow"
+						doc:name="Flow Reference to common-http-request-flow (sfl-crm-persona-sys-api health-check)" />
+					<ee:transform doc:name="Normalize success response">
+						<ee:message>
+							<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	apiName: "sfl-crm-persona-sys-api",
+	status: payload.status default p('message.systemUp')
+}]]></ee:set-payload>
+						</ee:message>
+					</ee:transform>
+					<error-handler>
+						<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+							<ee:transform doc:name="Set API status down">
+								<ee:message>
+									<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	apiName: "sfl-crm-persona-sys-api",
+	status: p('message.systemDown')
+}]]></ee:set-payload>
+								</ee:message>
+							</ee:transform>
+						</on-error-continue>
+					</error-handler>
+				</try>
+			</route>
+
+		</scatter-gather>
+		<ee:transform doc:name="DW Set Readiness Response">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-readiness-response-success.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload doc:name="Log Healthcheck result"
+			config-ref="custom-logger-connector_config"
+			message="#[output application/json --- if(payload.status != p('message.systemsReady')) &quot;health check unsuccessful&quot; else &quot;health check successful&quot;]"
+			tracepoint="APPLICATION_EVENT"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</sub-flow>
+
+</mule>

@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:tracing="http://www.mulesoft.org/schema/mule/tracing"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-error-handler-plugin="http://www.mulesoft.org/schema/mule/module-error-handler-plugin"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/module-error-handler-plugin http://www.mulesoft.org/schema/mule/module-error-handler-plugin/current/mule-module-error-handler-plugin.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+http://www.mulesoft.org/schema/mule/tracing http://www.mulesoft.org/schema/mule/tracing/current/mule-tracing.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+	<!--
+	    Global Error Handler — two-branch pattern (consents-proc-api).
+
+	    Branch 1 — on-error-propagate (circuit-breaker / transient errors):
+	      Fires when error type matches ${mq.subscriber.circuitBreakerErrors} AND
+	      vars.mqAckToken is present (message was received from the MQ subscriber).
+	      Dual logs → delivery-count threshold check:
+	        ≥ threshold → common-log-integration-error-details-sub-flow (error into SF / DLQ fallback)
+	        < threshold → log "requeuing for retry"
+	      → anypoint-mq:nack (returns message to queue for redelivery)
+
+	    Branch 2 — on-error-continue (all other errors):
+	      General processing failures that should not block the consumer.
+	      Dual logs (encrypted + without payload) → set error variables →
+	      common-log-integration-error-details-sub-flow → responding-ack-sub-flow (ACK) →
+	      clear all vars so next message starts clean.
+	-->
+	<error-handler name="global-error-handler">
+
+		<!-- =====================================================================
+		     Branch 1: Transient / Circuit-Breaker Errors → NACK for redelivery
+		     ===================================================================== -->
+		<on-error-propagate
+			type="${mq.subscriber.circuitBreakerErrors}"
+			doc:name="Handle Transient Errors"
+			enableNotifications="true"
+			logException="true"
+			when="#[vars.mqAckToken != null]">
+
+			<module-logger:build-error-log-without-payload
+				doc:name="Log Transient Error Context"
+				config-ref="custom-logger-connector_config"
+				message="Transient failure in MQ consumer. NACK for retry"
+				logLevel="ERROR"
+				tracepoint="EXCEPTION"
+				sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+				targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]"
+				entityDetails="#[vars.requestContext.entityDetails default null]"
+				cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+				errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+				errorDescription='#[error.description default ""]'
+				errorCode="#[error.errorMessage.attributes.statusCode default 500]" />
+
+			<module-logger:build-error-log-with-encrypted-payload
+				doc:name="Log Transient Error Payload"
+				config-ref="custom-logger-connector_config"
+				message="Transient MQ failure payload context"
+				logLevel="DEBUG"
+				tracepoint="EXCEPTION"
+				sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+				targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]"
+				entityDetails="#[vars.requestContext.entityDetails default null]"
+				cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+				errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+				errorDescription='#[error.description default ""]'
+				errorCode="#[error.errorMessage.attributes.statusCode default 500]">
+				<module-logger:body><![CDATA[#[output application/json ---
+{
+    originalPayload: vars.originalPayload,
+    deliveryCount: vars.deliveryCount
+}]]]></module-logger:body>
+			</module-logger:build-error-log-with-encrypted-payload>
+
+			<!--
+			    Delivery count threshold check.
+			    If deliveryCount >= mq.transactionErrors.deliveryCountThreshold:
+			      → log into Salesforce via sfl-crm-persona (or DLQ fallback)
+			    Otherwise:
+			      → log "requeuing" and let NACK return it to the queue
+			-->
+			<choice doc:name="Check Delivery Count Threshold">
+				<when expression="#[(vars.deliveryCount default attributes.deliveryCount default 1) >= (p('mq.transactionErrors.deliveryCountThreshold') as Number)]">
+					<module-logger:build-log-without-payload
+						doc:name="Log Max Delivery Count Reached"
+						config-ref="custom-logger-connector_config"
+						message="#[output application/json ---
+'Max delivery count reached (' ++ (vars.deliveryCount as String) ++ '). Routing to integration error log / DLQ.']"
+						tracepoint="APPLICATION_EVENT"
+						sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+						targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]" />
+					<set-variable variableName="errorDetails" value="#[error]" doc:name="Set Error Details" />
+					<set-payload value="#[vars.originalPayload default payload]" doc:name="Restore Original Payload" />
+					<ee:transform doc:name="Set Transaction Error Payload">
+						<ee:message />
+						<ee:variables>
+							<ee:set-variable resource="dwls/v-transaction-error-payload.dwl" variableName="transactionErrorRequest" />
+						</ee:variables>
+					</ee:transform>
+					<flow-ref doc:name="Flow Reference to common-log-integration-error-details-sub-flow"
+						name="common-log-integration-error-details-sub-flow" />
+				</when>
+				<otherwise>
+					<module-logger:build-log-without-payload
+						doc:name="Log Requeuing Message"
+						config-ref="custom-logger-connector_config"
+						message="#[output application/json ---
+'Requeuing message for retry. DeliveryCount: ' ++ ((vars.deliveryCount as String) default '') ++ '. Message will be redelivered to Anypoint MQ.']"
+						tracepoint="APPLICATION_EVENT"
+						sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+						targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]" />
+				</otherwise>
+			</choice>
+
+			<anypoint-mq:nack doc:name="NACK Message - Retry"
+				config-ref="anypoint-mq_config"
+				ackToken="#[vars.mqAckToken]" />
+		</on-error-propagate>
+
+		<!-- =====================================================================
+		     Branch 2: General / Non-Transient Errors → ACK (do not redeliver)
+		     ===================================================================== -->
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+			<tracing:with-correlation-id
+				doc:name="With CorrelationID"
+				correlationId="#[vars.transactionId default correlationId]">
+
+				<module-error-handler-plugin:process-error
+					doc:name="Process Error"
+					error="#[vars.errorDetails default error]"
+					useGeneratedError="false">
+					<module-error-handler-plugin:custom-errors><![CDATA[#[${file::errors/customErrors.dwl}]]]></module-error-handler-plugin:custom-errors>
+					<module-error-handler-plugin:previous-error><![CDATA[#[vars.errorDetails.errorMessage.payload match {
+    case is Object -> vars.errorDetails.errorMessage.payload.error.message default vars.errorDetails.errorMessage.payload.error_description default ""
+    case is String -> vars.errorDetails.errorMessage.payload
+    else -> ""
+} default ""]]]></module-error-handler-plugin:previous-error>
+				</module-error-handler-plugin:process-error>
+
+				<set-variable variableName="httpStatus"
+					value="#[attributes.httpStatus default 500]"
+					doc:name="Set HTTP Status Code" />
+
+				<!-- ERROR log with original payload body (encrypted) -->
+				<module-logger:build-error-log-with-encrypted-payload
+					doc:name="Log Error"
+					config-ref="custom-logger-connector_config"
+					message='#[output application/json ---
+(attributes.httpStatus default "500") ++ " " ++ (payload.error.reason default "Internal Server Error")]'
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+					targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]"
+					entityDetails="#[vars.requestContext.entityDetails default null]"
+					errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+					errorDescription='#[error.description default ""]'
+					cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+					errorCode='#[vars.httpStatus default "500"]'>
+					<module-logger:body><![CDATA[#[vars.originalPayload default payload]]]></module-logger:body>
+				</module-logger:build-error-log-with-encrypted-payload>
+
+				<!-- INFO log — no payload (always safe for PROD) -->
+				<module-logger:build-error-log-without-payload
+					doc:name="Log Error Info"
+					config-ref="custom-logger-connector_config"
+					message='#[output application/json ---
+(attributes.httpStatus default "500") ++ " " ++ (payload.error.reason default "Internal Server Error")]'
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+					targetSystem="#[vars.requestContext.targetSystem default p('targetSystem')]"
+					entityDetails="#[vars.requestContext.entityDetails default null]"
+					errorType='#[(error.errorType.namespace default "UNKNOWN") ++ ":" ++ (error.errorType.identifier default "UNKNOWN")]'
+					cause='#[error.cause.localizedMessage default error.detailedDescription default ""]'
+					errorCode='#[vars.httpStatus default "500"]'
+					errorDescription='#[error.description default ""]' />
+
+				<ee:transform doc:name="Set Error Variables and Transaction Error Payload">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="errorCode"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.httpStatus default 500]]></ee:set-variable>
+						<ee:set-variable variableName="errorMessage"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.errorLog default ""]]></ee:set-variable>
+						<ee:set-variable resource="dwls/v-transaction-error-payload.dwl" variableName="transactionErrorRequest" />
+					</ee:variables>
+				</ee:transform>
+
+				<flow-ref doc:name="Flow Reference to common-log-integration-error-details-sub-flow"
+					name="common-log-integration-error-details-sub-flow" />
+				<flow-ref doc:name="Flow Reference to responding-ack-sub-flow"
+					name="responding-ack-sub-flow" />
+
+			<!-- Clear all variables so the next message starts with a clean context -->
+			<foreach doc:name="For Each" collection="#[namesOf(vars)]">
+				<remove-variable doc:name="Removing All Variables" variableName="#[payload]"/>
+			</foreach>
+			</tracing:with-correlation-id>
+		</on-error-continue>
+	</error-handler>
+
+	<!-- =====================================================================
+	     check-for-raise-error-sub-flow
+	     Called from common-connectivity.xml after each outbound HTTP request.
+	     Raises APP:CONNECTIVITY_FAILED when vars.success == false so the
+	     global error handler catches it uniformly.
+	     ===================================================================== -->
+	<sub-flow name="check-for-raise-error-sub-flow">
+		<choice doc:name="CHECK for Success == false">
+			<when expression="#[!vars.success default false]">
+				<raise-error
+					doc:name="RAISE APP:CONNECTIVITY_FAILED"
+					type="APP:CONNECTIVITY_FAILED"
+					description='#[vars.errorDetails.description default error.detailedDescription default "Connectivity failed"]' />
+			</when>
+		</choice>
+	</sub-flow>
+
+</mule>

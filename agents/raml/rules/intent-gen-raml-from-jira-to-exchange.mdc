@@ -1,0 +1,567 @@
+---
+description: >-
+  Full end-to-end workflow: fetches JIRA stories, generates/updates a RAML spec
+  from Confluence design, upgrades the common-fragment-library to the latest
+  Exchange version, then publishes an editable asset via Design Center.
+  Triggers when the user says "publish raml <JIRA-ID>",
+  "publish raml <JIRA-ID> <JIRA-ID>", or "publish exchange <spec-folder-name>".
+globs:
+alwaysApply: false
+---
+
+# JIRA-to-Exchange RAML Publish Workflow
+
+Execute all phases below automatically when the user provides JIRA story IDs or a local spec folder name. Do not stop to ask unless a value is genuinely ambiguous after reading all sources.
+
+**Trigger phrases:**
+- `publish raml <JIRA-ID> [<JIRA-ID>...]` — full end-to-end (Phases 1-8)
+- `publish exchange <spec-folder-name>` — skip to Phase 6 if RAML already exists locally
+
+---
+
+## Phase 1 — Read Standards First (parallel)
+
+Before touching any files, read these two rules simultaneously:
+- `gen-raml-implementation.mdc` — RAML structure, naming conventions, CommonLib usage, mandatory patterns
+- `review-api-design-standards.mdc` — validation checklist to apply before finishing
+
+---
+
+## Phase 2 — Fetch Each JIRA Story
+
+For each story ID, call the JIRA REST API:
+
+```
+GET https://insulet.atlassian.net/rest/api/3/issue/{STORY-ID}
+Authorization: Basic base64(email:token)
+Accept: application/json
+```
+
+**Credentials**: Read from `~/.cursor/mcp.json` → `mcpServers.atlassian-guardrails.envFile`
+
+To locate the .env file, read `~/.cursor/mcp.json` and extract the `envFile` path for the `atlassian-guardrails` MCP server. Required variables:
+- `JIRA_EMAIL` — account email
+- `JIRA_TOKEN` — API token
+
+Fields to extract:
+
+| Field | JSON key |
+|---|---|
+| Summary | `fields.summary` |
+| User story | `fields.description` |
+| Acceptance Criteria | `fields.customfield_10308` |
+| Technical Notes (Confluence URL lives here) | `fields.customfield_10364` |
+
+Parse Atlassian Document Format (ADF) nodes to plain text. Confluence URLs appear as `inlineCard` nodes or plain `text` nodes inside `customfield_10364`.
+
+---
+
+## Phase 3 — Fetch the Confluence Design Page
+
+Extract the Confluence page URL from Technical Notes. URL format:
+```
+https://insulet.atlassian.net/wiki/spaces/{SPACE}/pages/{PAGE-ID}/{SLUG}
+```
+
+Fetch with the same credentials:
+```
+GET https://insulet.atlassian.net/wiki/rest/api/content/{PAGE-ID}?expand=body.storage
+Authorization: Basic base64(email:token)
+Accept: application/json
+```
+
+Strip HTML from `body.storage.value` and extract:
+- Endpoint paths (e.g., `GET /consents`, `PUT /consents/{id}`)
+- Query parameters, URI parameters, request body fields (name, type, mandatory flag)
+- Output field mappings — API field name, data type, Salesforce source field, description
+- HTTP status codes and their trigger conditions
+- Salesforce object name (e.g., `ContactPointTypeConsent`)
+
+If multiple JIRA stories reference the same Confluence page, fetch it only once.
+
+---
+
+## Phase 4 — Resolve Design Decisions (automatic, no user prompt)
+
+Apply these precedence rules in order:
+
+| Decision | Rule |
+|---|---|
+| Field naming conflict between JIRA TC Guide and Confluence column header | **JIRA TC Guide wins** — e.g., if TC Guide says "Map Name to `consentName`", use `consentName` even if the Confluence column header says `name` |
+| Response envelope | **Always `data`** as the top-level wrapper per `gen-raml-implementation.mdc` §5 — regardless of what Confluence shows |
+| HTTP verb | **Follow Confluence/JIRA exactly** — do not silently change PUT to PATCH or vice versa |
+| PUT endpoints | **Inline body/responses** — `CommonLib.generic` defines `get?`, `post?`, `patch?` only; for PUT, define the method explicitly with `is: [CommonLib.common-error-handler, CommonLib.common-headers, CommonLib.system-headers]` |
+| Fields with no Salesforce mapping | **Remove them** — do not include fields that have no source field in the Confluence output table |
+| Extra fields not in Confluence output (e.g., `referenceId`) | **Remove them** |
+| `data` wrapper for Salesforce update responses | Apply `data` object wrapper with `id` and `success` |
+
+---
+
+## Phase 5 — Generate or Update RAML
+
+**Output location:** `agents/raml/examples/{api-spec-name}/`
+
+Derive `api-spec-name` from Confluence/JIRA using the `{name}-{layer}-api-spec` pattern (no regional prefix).
+
+- **Spec already exists** → update files in place, remove stale fields/DataTypes not in the current Confluence design
+- **Spec does not exist** → scaffold the folder structure with an empty `exchange_modules/` directory — Phase 7 will download and populate it from Exchange (Phase 7 always runs for new specs)
+
+### Folder structure
+
+```
+{api-spec-name}/
+├── {api-spec-name}.raml          ← root RAML
+├── dataTypes/
+│   └── {DataTypeName}.raml       ← one file per type (TitleCase)
+├── examples/
+│   └── {ExampleName}Example.raml ← one file per example (TitleCase)
+└── exchange_modules/             ← populated from Exchange in Phase 7 (always runs for new specs)
+```
+
+### Root RAML patterns
+
+**Security — always use library reference, never a direct file include:**
+```yaml
+securedBy:
+  - CommonLib.client-id-scheme
+```
+
+**`CommonLib.generic` for POST — include all required params (v1.0.14+ requires `postResponseType`):**
+```yaml
+type:
+  CommonLib.generic:
+    postDescription: "..."
+    postBodyType: MyRequestType
+    postBodyExample: !include examples/MyRequestExample.raml
+    postResponseExample: !include examples/MyResponseExample.raml
+    postResponseType: MyResponseType
+```
+
+**PUT endpoints — inline, not via CommonLib.generic:**
+```yaml
+/{id}:
+  put:
+    description: "..."
+    body:
+      application/json:
+        type: MyUpdateRequest
+        example: !include examples/MyUpdateRequestExample.raml
+    responses:
+      201:
+        body:
+          application/json:
+            type: MyUpdateResponse
+            example: !include examples/MyUpdateResponseExample.raml
+  is: [CommonLib.common-error-handler, CommonLib.common-headers, CommonLib.system-headers]
+```
+
+### Phase 5 checklist
+
+- [ ] All business endpoints use `CommonLib.generic` (except PUT — inline)
+- [ ] `CommonLib.common-error-handler` applied to every endpoint via `is:`
+- [ ] No manually defined 4xx/5xx responses in root RAML
+- [ ] Every response DataType and example has a top-level `data` wrapper
+- [ ] Example files are TitleCase (e.g., `ConsentsGetResponseExample.raml`)
+- [ ] No regional prefix in spec name
+- [ ] `baseUri` declared
+- [ ] `/ping` and `/health-check` included using `CommonLib.liveliness-probe` / `CommonLib.readiness-probe`
+- [ ] `securedBy: [CommonLib.client-id-scheme]` (not a direct file include)
+- [ ] `postResponseType` supplied wherever `CommonLib.generic` is used with `post?`
+
+---
+
+## Phase 5b — Persist Context to input_develop
+
+After RAML generation is complete (and before proceeding to Phase 6), write the following files to `project/input_develop/` so the develop agent has full business context without re-fetching from JIRA or Confluence.
+
+> **Skip this phase** when the command was triggered with `publish exchange <spec-folder-name>` — in that mode Phases 2–5 are skipped and no JIRA/Confluence data was fetched.
+
+### `project/input_develop/jira-{STORY-ID}.md`
+
+```markdown
+# JIRA: {STORY-ID} — {Summary}
+
+## User Story
+{parsed text from fields.description}
+
+## Acceptance Criteria
+{parsed text from fields.customfield_10308}
+
+## Technical Notes
+{parsed text from fields.customfield_10364}
+
+## Confluence Design URL
+{extracted URL}
+```
+
+### `project/input_develop/confluence-design-{STORY-ID}.md`
+
+```markdown
+# Confluence Design: {Page Title}
+Source: {URL}
+
+## Endpoints
+{table or list of endpoints with HTTP verb, path, description}
+
+## Request / Response Fields
+{field tables — name, type, mandatory, description, Salesforce source}
+
+## Downstream Systems
+{systems identified in the design with their operations}
+
+## HTTP Status Codes
+{table of status codes and their trigger conditions}
+```
+
+**Rules:**
+- If multiple JIRA stories were fetched, create one `jira-{STORY-ID}.md` per story.
+- Create one `confluence-design-{STORY-ID}.md` per story (e.g., `confluence-design-NGCRMI-1979.md`, `confluence-design-NGCRMI-1980.md`). If a single Confluence page covers multiple stories, the content is identical across files.
+- Overwrite any existing file with the same name.
+- Write complete extracted content — do not summarise or truncate.
+
+---
+
+## Phase 6 — Check Latest common-fragment-library Version
+
+Before publishing, always verify the local `exchange_modules/` is on the latest version.
+
+Query Exchange:
+```
+GET /exchange/api/v2/assets
+  ?organizationId={BU_GROUP_ID}
+  &search=common-fragment-library
+  &types=raml-fragment
+Authorization: Bearer {token}
+```
+
+**Credentials**: Read from `~/.cursor/mcp.json` → `mcpServers.anypoint-guardrails.envFile`
+
+To locate the .env file, read `~/.cursor/mcp.json` and extract the `envFile` path for the `anypoint-guardrails` MCP server. Required variables:
+- `ANYPOINT_CLIENT_ID`, `ANYPOINT_CLIENT_SECRET`
+- `ANYPOINT_BU_GROUP_ID` = `e0bc8c96-9dbd-48bc-915e-3e29577af6b3`
+
+Get the Bearer token first:
+```
+POST /accounts/api/v2/oauth2/token
+grant_type=client_credentials&client_id=...&client_secret=...
+```
+
+The `version` field on the returned asset is the latest. If it is newer than what is in the local `exchange_modules/` folder, proceed to Phase 7.
+
+---
+
+## Phase 7 — Upgrade exchange_modules and Root RAML References
+
+### Download the latest common-fragment-library zip
+
+```
+GET /exchange/api/v2/assets/{BU_GROUP_ID}/common-fragment-library/{LATEST_VERSION}
+→ find file with classifier=raml-fragment, packaging=zip
+→ download from the S3 externalLink WITHOUT Authorization header (pre-signed URL)
+```
+
+### Replace local exchange_modules
+
+```
+# Remove old version folder
+rm -rf exchange_modules/{BU_GROUP_ID}/common-fragment-library/{OLD_VERSION}/
+
+# Extract new version into
+exchange_modules/{BU_GROUP_ID}/common-fragment-library/{LATEST_VERSION}/
+```
+
+### Update all version references in the spec
+
+1. In `{api-spec-name}.raml` — update `uses:` path:
+   ```yaml
+   uses:
+     CommonLib: exchange_modules/{BU}/{assetId}/{LATEST_VERSION}/common-fragment-library.raml
+   ```
+2. In `exchange.json` — update the dependency version:
+   ```json
+   "dependencies": [{ "version": "{LATEST_VERSION}", ... }]
+   ```
+3. Scan the new `resourceTypes/resourceType.raml` for any new required parameters. For each `CommonLib.generic` usage in the root RAML, add any missing required parameter (e.g., `postResponseType`, `getResponseType`).
+
+### Verify no `1.0.2` references remain
+```bash
+grep -r "{OLD_VERSION}" .  # must return no matches
+```
+
+---
+
+## Phase 8 — Publish via Design Center (Editable Exchange Asset)
+
+Publishing directly to Exchange (raw multipart API) creates a **read-only** asset with no Design Center project link. Always publish via Design Center to produce an editable asset.
+
+### Critical API facts
+
+| Fact | Detail |
+|---|---|
+| `x-owner-id` header | Required on all Design Center write calls — client_credentials tokens carry no `userId` claim. Resolve from `GET /accounts/api/me` → `user.id` |
+| Branch lock | Must call `acquireLock` before `save`, and always call `releaseLock` in a finally block |
+| No exchange_modules in upload | Upload only RAML files + `exchange.json`. Design Center resolves CommonLib dependency from Exchange automatically |
+| `exchange.json` name alignment | The `name` field in `exchange.json` must exactly match the `name` value sent in the publish call |
+| Use the spec owner's user ID | The project owner in Design Center must be the logged-in Anypoint user — use their ID as `x-owner-id` |
+| **Metadata in exchange.json** | **REQUIRED** — `exchange.json` must contain `metadata` block with `projectId`, `branchId`, and `commitId` before publishing. Fetch commitId after each save and update exchange.json accordingly |
+| Lock for publish | Must re-acquire lock before calling publish/exchange endpoint — publish requires an active lock |
+
+### API call sequence
+
+All calls use these headers unless noted:
+```
+Authorization: Bearer {token}
+x-organization-id: {BU_GROUP_ID}
+x-owner-id: {userId}            ← resolved from /accounts/api/me
+Content-Type: application/json
+```
+
+**Step 8.1 — Resolve owner user ID**
+```
+GET /accounts/api/me
+→ response.user.id
+```
+
+**Step 8.2 — Create Design Center project**
+```
+POST /designcenter/api-designer/projects
+Body: { "name": "{api-spec-name}", "type": "raml" }
+→ response.id = {project_id}
+```
+
+**Step 8.3 — Acquire branch lock**
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/acquireLock
+Body: {}
+→ { "locked": true, "name": "..." }
+```
+
+**Step 8.4 — Upload RAML files (initial save)**
+
+Files to include (skip `exchange_modules/` entirely):
+- `{api-spec-name}.raml`
+- `dataTypes/*.raml` (all files)
+- `examples/*.raml` (all files)
+- `exchange.json` (with placeholder metadata — will be updated in Step 8.6)
+
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/save
+Body: [
+  { "path": "{api-spec-name}.raml", "content": "..." },
+  { "path": "dataTypes/MyType.raml", "content": "..." },
+  { "path": "examples/MyExample.raml", "content": "..." },
+  { "path": "exchange.json", "content": "..." }
+]
+```
+
+**Step 8.5 — Fetch commitId and update exchange.json with complete metadata**
+
+After the initial save, fetch the latest commitId from Design Center:
+```
+GET /designcenter/api-designer/projects/{project_id}/branches/master/commits?limit=1
+→ response[0].id = {commitId}
+```
+
+Update the local `exchange.json` to include the complete `metadata` block:
+```json
+{ 
+  "main": "{api-spec-name}.raml",
+  "name": "{Human Readable API Name}",
+  "classifier": "raml",
+  ...
+  "metadata": {
+    "projectId": "{project_id}",
+    "branchId": "master",
+    "commitId": "{commitId}"
+  }
+}
+```
+
+Save the updated `exchange.json` to Design Center:
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/save
+Body: [
+  { "path": "exchange.json", "content": "{updated exchange.json with metadata}" }
+]
+```
+
+Fetch the new commitId after this save (the metadata save creates a new commit):
+```
+GET /designcenter/api-designer/projects/{project_id}/branches/master/commits?limit=1
+→ response[0].id = {final_commitId}
+```
+
+Update the local `exchange.json` with the final commitId for local consistency.
+
+**Step 8.6 — Release branch lock (always, even on error)**
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/releaseLock
+Body: {}
+→ { "locked": false }
+```
+
+**Step 8.7 — Acquire lock for publish**
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/acquireLock
+Body: {}
+→ { "locked": true, "name": "..." }
+```
+
+**Step 8.8 — Publish to Exchange**
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/publish/exchange
+Body: {
+  "name": "{Human Readable API Name}",
+  "main": "{api-spec-name}.raml",
+  "apiVersion": "v1",
+  "version": "{semver e.g. 1.0.0}",
+  "assetId": "{api-spec-name}",
+  "groupId": "{BU_GROUP_ID}",
+  "classifier": "raml"
+}
+```
+
+On success (HTTP 200) the asset is live at:
+```
+https://anypoint.mulesoft.com/exchange/{BU_GROUP_ID}/{api-spec-name}/{version}/
+```
+
+**Step 8.9 — Release lock after publish**
+```
+POST /designcenter/api-designer/projects/{project_id}/branches/master/releaseLock
+Body: {}
+→ { "locked": false }
+```
+
+### Version strategy
+
+If the asset already exists on Exchange from a previous raw API publish (read-only), bump the version by one patch (e.g., existing `1.0.0` → publish as `1.0.1` from Design Center). The Design Center publish will add the editable version alongside the existing read-only one. The read-only version cannot be deleted via API (Exchange DELETE is not supported for `rest-api` assets).
+
+### Reusable MCP tool
+
+The `anypoint-guardrails` MCP server exposes `anypoint_create_and_publish_design_center` which wraps Phase 8 steps 8.1-8.6 as a single tool call:
+
+```
+anypoint_create_and_publish_design_center(
+  project_name    = "{api-spec-name}",
+  spec_folder_path= "/abs/path/to/{api-spec-name}/",
+  asset_id        = "{api-spec-name}",
+  asset_version   = "1.0.0",
+  display_name    = "{Human Readable Name}",
+  description     = "...",
+  api_version     = "v1",
+  main_file       = "{api-spec-name}.raml"
+)
+```
+
+The tool automatically excludes `exchange_modules/`, acquires and releases the lock, and returns the Exchange URL on success.
+
+---
+
+## Pre-Publish Checklist (Phases 6-8 gates)
+
+Before calling Phase 8, verify all items:
+
+- [ ] Local `exchange_modules/` is on the latest `common-fragment-library` version from Exchange
+- [ ] All `uses:` and `!include` paths in root RAML reference the new version folder
+- [ ] `exchange.json` `name` field matches the human-readable display name (e.g., `"SFL Consents System API"`)
+- [ ] `exchange.json` dependency `version` updated to latest `common-fragment-library` version
+- [ ] `securedBy: [CommonLib.client-id-scheme]` — no direct `!include exchange_modules/.../securitySchemes/...`
+- [ ] `postResponseType` (and any other params added in the latest resourceType.raml) present wherever `CommonLib.generic` is used
+- [ ] No stale version strings (e.g., `1.0.2`) remaining anywhere in the spec folder
+- [ ] **`exchange.json` contains `metadata` block** with `projectId`, `branchId`, and `commitId`
+- [ ] Branch lock released after file upload (confirmed `{"locked": false}`)
+- [ ] Publish call returns HTTP 200 with `assetId` in the response body
+
+---
+
+## exchange.json Metadata Requirements
+
+**MANDATORY**: Every `exchange.json` must include a `metadata` block before publishing to Exchange.
+
+### Required metadata structure:
+```json
+{
+  "main": "{api-spec-name}.raml",
+  "name": "{Human Readable API Name}",
+  "classifier": "raml",
+  "tags": [...],
+  "descriptorVersion": "1.0.0",
+  "organizationId": "{BU_GROUP_ID}",
+  "apiVersion": "v1",
+  "originalFormatVersion": "1.0",
+  "dependencies": [...],
+  "groupId": "{BU_GROUP_ID}",
+  "assetId": "{api-spec-name}",
+  "version": "{semver}",
+  "metadata": {
+    "projectId": "{Design Center project UUID}",
+    "branchId": "master",
+    "commitId": "{Git commit SHA from Design Center}"
+  }
+}
+```
+
+### Metadata field sources:
+
+| Field | Source |
+|---|---|
+| `projectId` | Design Center project ID — from `POST /designcenter/api-designer/projects` response or existing project lookup |
+| `branchId` | Always `"master"` for main branch |
+| `commitId` | Latest commit SHA — from `GET /designcenter/api-designer/projects/{id}/branches/master/commits?limit=1` → `response[0].id` |
+
+### Metadata update workflow:
+
+1. **Initial save** — Save all RAML files + exchange.json (metadata can have placeholder commitId)
+2. **Fetch commitId** — After save, query the commits endpoint to get the actual commitId
+3. **Update exchange.json** — Add/update the `metadata` block with the real commitId
+4. **Save again** — Push the updated exchange.json to Design Center
+5. **Fetch final commitId** — The metadata update creates a new commit; fetch this final commitId
+6. **Update local copy** — Update the local exchange.json with the final commitId for consistency
+7. **Publish** — Proceed to publish to Exchange
+
+### Validation before publish:
+
+```bash
+# Check metadata exists in exchange.json
+jq '.metadata' exchange.json
+# Must return object with projectId, branchId, commitId — NOT null
+```
+
+If `metadata` is missing or incomplete, **DO NOT PUBLISH**. Complete Steps 8.5-8.6 first.
+
+---
+
+## Dependency Map
+
+```
+intent-gen-raml-from-jira-to-exchange.mdc
+│
+├── reads at runtime
+│   ├── gen-raml-implementation.mdc          (RAML structure + CommonLib rules)
+│   └── review-api-design-standards.mdc      (design validation checklist)
+│
+├── credential files
+│   ├── insulet-atlassian-mcp-guardrails-main/.env  (JIRA_EMAIL, JIRA_TOKEN)
+│   └── anypoint-mcp-guardrails/.env                (CLIENT_ID, CLIENT_SECRET, BU_GROUP_ID)
+│
+├── local assets
+│   └── agents/raml/examples/{api-spec-name}/
+│       └── exchange_modules/ populated by Phase 7 — downloaded from Anypoint Exchange at generation time
+│
+└── MCP server (must be running)
+    └── anypoint-guardrails  (tool: anypoint_create_and_publish_design_center)
+        └── configured in ~/.cursor/mcp.json
+```
+
+---
+
+## Integration with Other Rulesets
+
+This file is self-contained and designed for clean composition:
+
+- **RAML-only workflow**: Use `intent-gen-raml-from-jira.mdc` when you only need local RAML generation without publishing.
+- **Publish-only**: Trigger with `publish exchange <spec-folder-name>` to skip Phases 1-5 and run only Phases 6-8 on an already-generated local spec.
+- **Calling from other intents**: Future intent files can reference specific phases by number, e.g., "run Phases 6-8 of `intent-gen-raml-from-jira-to-exchange.mdc`" to re-publish an existing spec.
+- **Review integration**: After Phase 5, the output spec can be passed to `intent-review.mdc` for a full code review before proceeding to Phase 6.
+- **MUnit integration**: After Phase 5, use `intent-gen-munit.mdc` to generate MUnit tests for the generated Mule implementation before the spec is published.

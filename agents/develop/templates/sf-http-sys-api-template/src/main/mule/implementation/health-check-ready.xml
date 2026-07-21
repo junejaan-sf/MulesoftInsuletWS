@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!-- =========================================================
+	     HEALTHCHECK SUB-FLOW — GET /health-check (readiness)
+	
+	     Checks Salesforce connectivity using get-server-timestamp.
+	     On success: p-set-readiness-response.dwl returns "ready".
+	     On error:   logs 503, sets payload with systemDown status,
+	                 then p-set-readiness-response.dwl returns "down".
+	     ========================================================= -->
+	<sub-flow name="healthcheck-sub-flow" doc:id="ffffffff-cccc-3333-dddd-000000000135">
+		<try doc:name="Try" doc:id="11111111-dddd-4444-eeee-000000000136">
+
+			<!-- Check connectivity by retrieving SF server timestamp -->
+			<flow-ref doc:name="get-timestamp-sub-flow" doc:id="22222222-dddd-4444-eeee-000000000137" name="get-timestamp-sub-flow" />
+
+			<error-handler>
+				<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="33333333-dddd-4444-eeee-000000000138">
+					<module-logger:build-error-log-without-payload
+						doc:name="Log Healthcheck Error"
+						doc:id="44444444-dddd-4444-eeee-000000000139"
+						config-ref="custom-logger-connector_config"
+						message="Health check failed — Salesforce unavailable"
+						tracepoint="EXCEPTION"
+						sourceSystem="#[vars.requestContext.sourceSystem]"
+						targetSystem="#[vars.requestContext.targetSystem]"
+						errorType='#[error.errorType.identifier default "UNKNOWN"]'
+						errorDescription='#[error.description default "Salesforce connectivity failed"]'
+						cause='#[error.cause.message default ""]'
+						errorCode="503" />
+					<!-- Set system-down payload for readiness response aggregation -->
+					<set-payload
+						value='#[%dw 2.0&#10;output application/json&#10;---&#10;{&#10;    "name": p("targetSystem"),&#10;    "status": p("message.systemDown")&#10;}]'
+						doc:name="Set API Status Down"
+						doc:id="55555555-dddd-4444-eeee-000000000140" />
+				</on-error-continue>
+			</error-handler>
+		</try>
+
+		<!-- Aggregate dependency statuses into a standardised readiness response -->
+		<ee:transform doc:name="DW Set Healthcheck Response" doc:id="66666666-dddd-4444-eeee-000000000141">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-readiness-response.dwl" />
+			</ee:message>
+		</ee:transform>
+
+		<!-- Log result for operational visibility -->
+		<module-logger:build-log-without-payload
+			doc:name="Log Healthcheck Result"
+			doc:id="77777777-dddd-4444-eeee-000000000142"
+			config-ref="custom-logger-connector_config"
+			message="#[output application/json --- if(payload.status != p('message.systemsReady')) 'health check unsuccessful' else 'health check successful']"
+			tracepoint="AFTER_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</sub-flow>
+
+	<!-- =========================================================
+	     GET TIMESTAMP SUB-FLOW
+	     Executes a lightweight salesforce:get-server-timestamp to
+	     validate that the Salesforce JWT session is live.
+	     ========================================================= -->
+	<sub-flow name="get-timestamp-sub-flow" doc:id="88888888-dddd-4444-eeee-000000000143">
+		<salesforce:get-server-timestamp
+			doc:name="Get Server Timestamp"
+			doc:id="99999999-dddd-4444-eeee-000000000144"
+			config-ref="salesforce_config" />
+		<set-payload
+			value='#[%dw 2.0&#10;output application/json&#10;---&#10;payload as String {format: "uuuu-MM-dd KK:mm:ss a"}]'
+			doc:name="Convert Timestamp to JSON"
+			doc:id="aaaaaaaa-dddd-4444-eeee-000000000145" />
+	</sub-flow>
+
+</mule>

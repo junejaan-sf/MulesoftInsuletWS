@@ -1,0 +1,305 @@
+# =============================================================================
+# Salesforce regression ruleset - TEMPLATE
+#
+# Copy this file to `regression-tooling/<your-api-name>/ruleset.yaml`, then:
+#   1. Replace every <<placeholder>> in the top section.
+#   2. Adapt or delete the 6 seed rules below to match your Mule app's
+#      Salesforce post-conditions. Each seed demonstrates one common
+#      pattern - keep the patterns you need, delete the rest.
+#   3. Cite the source DWL/XML lines in each rule's `cites:` block.
+#
+# Grammar reference:    regression-tooling/RULESET-SCHEMA.md
+# Transform reference:  regression-tooling/TRANSFORMS.md
+# Runner:               agents/regression/templates/regression-validate.mdc
+#                       (copy to .cursor/rules/regression-validate.mdc to activate)
+# Canonical example:    regression-tooling/na-patient-proc-api/ruleset.yaml
+#
+# Rule of thumb: one rule per Salesforce object that the Mule app
+# upserts/creates. Keep the SOQL's WHERE clause aligned with the Mule app's
+# read-side (typically in `p-set-*-queries.dwl`) so the regression check
+# replays the same match logic the app uses.
+# =============================================================================
+ruleset:
+  name: <<your-api-name>>            # e.g. "na-orders-proc-api"
+  api_version: v62.0                 # Salesforce REST API version
+  default_org_alias: <<your-org>>    # e.g. "insulet-devint2"
+
+  # Anything the Mule app writes to Salesforce as a literal goes here so the
+  # rule bodies stay payload-driven. Mirrors
+  # `src/main/resources/properties/config.properties`.
+  consts:
+    AccountSource: <<value>>         # e.g. "ASPN"
+    # PrimaryRecordTypeName: <<value>>
+    # PrimaryRecordTypeDeveloperName: <<value>>
+    # IdentifierSourceId: "Customer ID"
+    # OpportunityStage: "New Opportunity"
+    # MedicationRequestStatus: "Active"
+    # ... add more as needed; one entry per Mule-hardcoded literal.
+
+  # Optional: name your bar-chart families explicitly. If absent, the runner
+  # buckets the bar chart by `rule.object`. Keep this commented out unless
+  # you have a strong opinion about chart grouping.
+  # families:
+  #   "Primary Account":      [account-primary]
+  #   "Identifiers":          [identifier-source-id, identifier-external-id]
+  #   "Contact Points":       [contact-point-address, contact-point-phone, contact-point-email]
+  #   "Opportunity + Lines":  [opportunity, opportunity-line-item]
+  #   "Audit / Errors":       [orgsync-staging, integration-error-absence]
+
+  rules:
+
+    # -------------------------------------------------------------------------
+    # PATTERN 1 - simple positive lookup
+    #
+    # Use for: a required record that the Mule app always creates, with a
+    # stable match key (e.g. an external Id Identifier, an Account Id, or
+    # an unambiguous composite). All `expect.fields` are asserted strict-equal.
+    #
+    # Variations:
+    # - For records matched purely by external Id upsert, the SOQL is just
+    #   `WHERE External_Id__c = '...'`.
+    # - For match-then-POST/PATCH records, the SOQL is the same composite
+    #   the Mule app's read-side uses.
+    # -------------------------------------------------------------------------
+    - id: account-primary
+      object: Account
+      description: |
+        Primary Account upserted by the Mule app. Match by the inbound
+        external Id Identifier (the same key the Mule app uses on its
+        read-side).
+      cites:
+        - <<your-api-name>>/src/main/mule/implementation/account-flow.xml
+        - <<your-api-name>>/src/main/resources/dwls/v-account-upsert-request.dwl
+      depends_on: []
+      when: "always"
+      capture_as: primaryAccount
+      lookup:
+        - soql: |
+            SELECT Id, Name, FirstName, LastName, AccountSource,
+                   RecordType.Name, RecordType.DeveloperName
+            FROM Account
+            WHERE Id IN (
+              SELECT ParentRecordId FROM Identifier
+              WHERE ID_Value__c   = '{{ payload.ExternalId }}'
+                AND IDUsageType   = '{{ consts.IdentifierExternalId }}'
+            )
+      expect:
+        record_count: 1
+        fields:
+          FirstName:                 "{{ payload.FirstName }}"
+          LastName:                  "{{ payload.LastName }}"
+          AccountSource:             "{{ consts.AccountSource }}"
+          RecordType.DeveloperName:  "{{ consts.PrimaryRecordTypeDeveloperName }}"
+
+    # -------------------------------------------------------------------------
+    # PATTERN 2 - conditional fields via long-form assertions with `when:`
+    #
+    # Use for: a record where some fields are only populated when the
+    # corresponding payload key is present. Mirrors the Mule app's "if X
+    # then write field Y" branches in DWL.
+    #
+    # Long-form syntax:
+    #   FieldName:
+    #     value: "<template>"
+    #     when:  "<predicate>"
+    # -------------------------------------------------------------------------
+    - id: contact-point-phone
+      object: ContactPointPhone
+      description: |
+        Phone contact-point. The Mule app only inserts the home phone when
+        `PatientPhone` (or your equivalent payload field) is present, so
+        we gate the whole rule with `when:` AND the assertions are tagged
+        with their own `when:` for any further-conditional fields.
+      cites:
+        - <<your-api-name>>/src/main/resources/dwls/v-contact-points-upsert.dwl
+      depends_on: [account-primary]
+      when: "payload.Phone is not empty"
+      lookup:
+        - soql: |
+            SELECT Id, TelephoneNumber, ParentId, IsPrimary
+            FROM ContactPointPhone
+            WHERE ParentId        = '{{ captures.primaryAccount.Id }}'
+              AND TelephoneNumber = '{{ payload.Phone }}'
+      expect:
+        record_count: 1
+        fields:
+          TelephoneNumber: "{{ payload.Phone }}"
+          IsPrimary:       "true"
+          # Conditional field - only assert when the optional payload key
+          # is present:
+          Extension:
+            value: "{{ payload.PhoneExtension }}"
+            when:  "payload.PhoneExtension is not empty"
+
+    # -------------------------------------------------------------------------
+    # PATTERN 3 - `allow_skip_when:` for optional parent records
+    #
+    # Use for: a Mule lookup whose record may or may not exist (e.g. the
+    # Mule app searches for an existing Provider Account and only creates
+    # downstream links if it finds one). When the record genuinely doesn't
+    # exist, we want `SKIPPED_OPTIONAL`, not `FAIL_RECORD_COUNT`.
+    #
+    # The `allow_skip_when:` predicate is evaluated AFTER the SOQL runs.
+    # If it returns true AND the record_count assertion failed, the rule
+    # is downgraded to SKIPPED_OPTIONAL and a sentinel `{Id: null,
+    # __skipped__: true}` is inserted into the capture so downstream rules
+    # can detect it via `captures.X.__skipped__ is not empty`.
+    # -------------------------------------------------------------------------
+    - id: account-provider
+      object: Account
+      description: |
+        Provider Account lookup (read-only). The Mule app does NOT create a
+        Provider Account from this flow - it only references one if it
+        already exists (matched by NPI). Downgrade missing-record to
+        SKIPPED_OPTIONAL since the absence is legitimate.
+      cites:
+        - <<your-api-name>>/src/main/resources/dwls/p-set-account-oli-queries.dwl
+      depends_on: []
+      when: "payload.ProviderNpi is not empty"
+      capture_as: providerAccount
+      lookup:
+        - soql: |
+            SELECT Id, Name, RecordType.Name, Custom_UniqueID__c
+            FROM Account
+            WHERE RecordType.Name      = '{{ consts.ProviderRecordTypeName }}'
+              AND Custom_UniqueID__c   = '{{ payload.ProviderNpi }}'
+      expect:
+        record_count: 1
+        allow_skip_when: "always"
+        fields:
+          RecordType.Name:    "{{ consts.ProviderRecordTypeName }}"
+          Custom_UniqueID__c: "{{ payload.ProviderNpi }}"
+
+    # -------------------------------------------------------------------------
+    # PATTERN 4 - multi-lookup with per-lookup `when:` (fallback strategy)
+    #
+    # Use for: a record where the Mule app's match strategy depends on
+    # which payload fields are populated. The runner walks the lookup list
+    # in order and picks the first one whose `when:` is true.
+    #
+    # Real-world driver: when an optional payload key like SourceID is
+    # present, match against existing records by that key; when absent,
+    # fall back to a different join that finds the newly-created record.
+    # -------------------------------------------------------------------------
+    - id: member-plan
+      object: MemberPlan
+      description: |
+        Insurance MemberPlan. When the payload's SourceID is present, match
+        an existing MemberPlan by ExternalIdentifier + the linked
+        Account.Custom_UniqueID__c. When SourceID is empty no existing
+        MemberPlan can be correlated by Customer-ID, so the Mule app
+        inserts a new MemberPlan for this account - match it via the FK to
+        the primaryAccount instead.
+      cites:
+        - <<your-api-name>>/src/main/resources/dwls/v-member-plan-upsert-request.dwl#L9-L26
+      depends_on: [account-primary]
+      when: "payload.RxMemberID is not empty"
+      capture_as: memberPlan
+      lookup:
+        - soql: |
+            SELECT Id, Name, Type__c, ExternalIdentifier, MemberId, Status
+            FROM MemberPlan
+            WHERE ExternalIdentifier         = '{{ payload.RxMemberID }}'
+              AND Member.Custom_UniqueID__c  = '{{ payload.SourceID }}'
+            ORDER BY CreatedDate DESC
+            LIMIT 1
+          when: "payload.SourceID is not empty"
+          description: "SourceID present -> match existing MemberPlan by Customer-ID"
+        - soql: |
+            SELECT Id, Name, Type__c, ExternalIdentifier, MemberId, Status
+            FROM MemberPlan
+            WHERE ExternalIdentifier = '{{ payload.RxMemberID }}'
+              AND MemberId           = '{{ captures.primaryAccount.Id }}'
+            ORDER BY CreatedDate DESC
+            LIMIT 1
+          when: "payload.SourceID is empty"
+          description: "SourceID absent -> match the new MemberPlan via the patient FK"
+      expect:
+        record_count: 1
+        fields:
+          ExternalIdentifier: "{{ payload.RxMemberID }}"
+          MemberId:           "{{ captures.primaryAccount.Id }}"
+          Type__c:            "{{ payload.InsuranceType }}"
+
+    # -------------------------------------------------------------------------
+    # PATTERN 5 - `case_insensitive: true` for Salesforce picklists
+    #
+    # Use for: any field where Salesforce case-normalises the value on
+    # save (typically restricted picklists like Gender, Status, etc.). The
+    # payload sends `"male"`, Salesforce stores `"Male"`, strict-equal
+    # would FAIL_FIELDS. Setting `case_insensitive: true` makes the
+    # comparison case-insensitive while still printing the raw expected and
+    # actual values verbatim in any failure report.
+    # -------------------------------------------------------------------------
+    - id: account-picklist-fields
+      object: Account
+      description: |
+        Demonstrates `case_insensitive: true` for fields that Salesforce
+        normalises on save. Strict-equal would create false-FAIL results
+        for picklists whose values arrive lowercase from the payload.
+      cites:
+        - <<your-api-name>>/src/main/resources/dwls/v-account-upsert-request.dwl#L40-L55
+      depends_on: [account-primary]
+      when: "always"
+      lookup:
+        - soql: |
+            SELECT Id, PersonGender, PersonGenderIdentity, Type
+            FROM Account
+            WHERE Id = '{{ captures.primaryAccount.Id }}'
+      expect:
+        record_count: 1
+        fields:
+          PersonGender:
+            value:            "{{ payload.Gender }}"
+            case_insensitive: true
+          PersonGenderIdentity:
+            value:            "{{ payload.Gender }}"
+            when:             "payload.Gender is not empty"
+            case_insensitive: true
+          # Mix-and-match: regular strict-equal fields can sit alongside
+          # case-insensitive ones in the same `fields:` block.
+          Type:               "{{ payload.AccountType }}"
+
+    # -------------------------------------------------------------------------
+    # PATTERN 6 - `mode: negative` (absence assertion)
+    #
+    # Use for: post-conditions that say "X must NOT exist". The classic
+    # case is "no Integration_Error__c rows should reference this payload's
+    # external Ids in the time window since the run started".
+    #
+    # Behaviour: `record_count: "==0"` plus `mode: negative` means the rule
+    # PASSES when zero records are found, FAILS otherwise, and the failure
+    # report includes every offending row for triage.
+    # -------------------------------------------------------------------------
+    - id: integration-error-absence
+      object: Integration_Error__c
+      description: |
+        Negative assertion: no `Integration_Error__c` rows should reference
+        the inbound external Ids in the time window starting at
+        `context.since_iso` (provided by the runner; defaults to now-24h).
+        Only filterable identifier columns are checked - long-text columns
+        like Payload_Data__c / Error_Message__c are not SOQL-filterable.
+      cites:
+        - <<your-api-name>>/src/main/mule/implementation/error-handler.xml
+      mode: negative
+      depends_on: [account-primary]
+      when: "always"
+      lookup:
+        - soql: |
+            SELECT Id, Name, ErrorType__c, External_Reference_ID__c,
+                   Correlation_ID__c, Transaction_Id__c, Source_System__c,
+                   Mule_App_Name__c, Resolved_Flag__c, CreatedDate
+            FROM Integration_Error__c
+            WHERE CreatedDate >= {{ context.since_iso }}
+              AND (
+                External_Reference_ID__c IN (
+                  '{{ payload.ExternalId }}',
+                  '{{ captures.primaryAccount.Id }}'
+                )
+                OR Correlation_ID__c LIKE '%{{ payload.ExternalId }}%'
+                OR Transaction_Id__c LIKE '%{{ payload.ExternalId }}%'
+              )
+            ORDER BY CreatedDate DESC
+            LIMIT 100
+      expect:
+        record_count: "==0"

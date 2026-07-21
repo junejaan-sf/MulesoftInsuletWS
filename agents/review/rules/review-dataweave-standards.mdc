@@ -1,0 +1,35 @@
+---
+description: Enforces DataWeave script externalization and naming conventions during code reviews
+globs: **/*.dwl
+alwaysApply: false
+---
+
+# DataWeave Script Standards
+
+## Externalization
+- **All DataWeave scripts must be externalized** into `.dwl` files under `src/main/resources/dwls/`
+- Inline DataWeave in Mule XML should be avoided — extract to external files
+- Only trivial single-line expressions (e.g., `vars.httpStatus`) may remain inline
+
+## File Naming
+- Files must use **lower-case-hyphenated** format with `.dwl` extension
+- Names must be concise and describe the transformation being performed
+- Examples:
+  - `create-issue-response-json.dwl`
+  - `usps-api-parameters.dwl`
+  - `p-set-common-error-response.dwl`
+
+## Prefix Convention (from project patterns)
+## - `v-` prefix: scripts that set variables (e.g., `v-request-context.dwl`)
+## - `p-` prefix: scripts that set payload (e.g., `p-set-liveness-response.dwl`)
+## - Follow existing prefix conventions consistently
+
+## Error Mapping Scripts
+- Custom error mapping DWL files go under `src/main/resources/errors/`
+- Must map error types to appropriate HTTP status codes, reasons, and messages
+
+## Review Checklist
+- [ ] No complex inline DataWeave in Mule XML files
+- [ ] DWL files are in `src/main/resources/dwls/` (or `errors/` for error maps)
+- [ ] File names are lower-case-hyphenated and descriptive
+## - [ ] Prefix convention (`v-`, `p-`) is followed consistently

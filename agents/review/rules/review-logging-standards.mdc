@@ -1,0 +1,122 @@
+---
+description: Enforces Insulet Custom Logger Connector usage, log categories, levels, and tracepoints during code reviews
+globs: "{**/src/main/mule/**/*.xml,**/log4j2*.xml}"
+alwaysApply: false
+---
+
+# Insulet Custom Logger Connector Standards
+
+All logging **must** use the `module-logger` (Insulet Custom Logger Connector) — never use the built-in Mule `logger` component.
+
+## Logger Operations — Choosing the Right One
+
+| Operation | Default Level | When to Use |
+|---|---|---|
+| `build-log-without-payload` | INFO | Flow milestones, metadata — **no payload** |
+| `build-log-with-masked-payload` | DEBUG | Debugging structure with sensitive fields replaced by `***` |
+| `build-log-with-encrypted-payload` | DEBUG | Full AES-256-CBC encrypted payload for compliance/audit recovery |
+| `build-error-log-without-payload` | INFO/ERROR | Error context without payload |
+| `build-error-log-with-masked-payload` | DEBUG | Error with masked payload for triage |
+| `build-error-log-with-encrypted-payload` | DEBUG | Error with encrypted payload for incident recovery |
+
+## Log Categories (Packages)
+
+Every `module-logger` component uses one of three `category` values:
+
+| Category | Level | Purpose |
+|---|---|---|
+| `com.insulet.general` | INFO | Milestones and metadata. **No payload allowed.** |
+| `com.insulet.maskedpayload` | DEBUG | Masked payloads for debugging structure |
+| `com.insulet.encryptedpayload` | DEBUG | Fully encrypted payloads for compliance/audits |
+
+### Connector Defaults
+
+The Insulet Custom Logger Connector **auto-sets `category`** based on the operation when the attribute is not explicitly provided:
+
+| Operation | Default Category |
+|---|---|
+| `build-log-without-payload` | `com.insulet.general` |
+| `build-log-with-masked-payload` | `com.insulet.maskedpayload` |
+| `build-log-with-encrypted-payload` | `com.insulet.encryptedpayload` |
+| `build-error-log-without-payload` | `com.insulet.general` |
+| `build-error-log-with-masked-payload` | `com.insulet.maskedpayload` |
+| `build-error-log-with-encrypted-payload` | `com.insulet.encryptedpayload` |
+
+### Review Severity
+
+- **Major**: `category` is present but **mismatched** with the operation (e.g., `category="com.insulet.general"` on a `build-log-with-encrypted-payload` logger)
+- **Minor (best practice)**: `category` is absent — the connector default is correct, but explicit values improve readability. Recommend adding for clarity.
+- `INFO`-level logs must **only** use "Without Payload" operations with category `com.insulet.general`
+- `DEBUG`-level logs must **always** use masked or encrypted operations — **never log raw payload**
+
+## Standardized Tracepoints
+
+Use **only** these values for the `tracepoint` parameter:
+- `FLOW_START` / `FLOW_END`
+- `BEFORE_HTTP_REQUEST` / `AFTER_HTTP_REQUEST`
+- `BEFORE_DB_CALL` / `AFTER_DB_CALL`
+- `BEFORE_SALESFORCE` / `AFTER_SALESFORCE`
+- `CRITICAL_CHECKPOINT`
+- `VALIDATION`
+- `APPLICATION_EVENT`
+- `TRANSFORMATION`
+- `EXCEPTION`
+
+### Connector Default
+
+The connector defaults `tracepoint` to **`FLOW_START`** when the attribute is not explicitly provided.
+
+### Review Severity
+
+- **Major**: `tracepoint` is present but **incorrect for context** (e.g., `tracepoint="BEFORE_HTTP_REQUEST"` inside an error handler — should be `EXCEPTION`). Also flag any non-standard tracepoint values.
+- **Major**: `tracepoint` is absent in a context where the default `FLOW_START` is **wrong** (e.g., error handlers must explicitly set `EXCEPTION`; exit loggers must explicitly set `FLOW_END`)
+- **Minor (best practice)**: `tracepoint` is absent but the default `FLOW_START` is correct for the context (e.g., entry loggers). Recommend adding for clarity.
+
+## Required Logger Attributes
+
+Every logger must include:
+- `config-ref` — pointing to the global custom logger config (e.g., `custom-logger-connector_config`)
+- `message` — descriptive message of the log point
+- `sourceSystem` — the originating system (e.g., `#[vars.requestContext.sourceSystem]` or `#[p('sourceSystem')]`)
+- `targetSystem` — the destination system
+- `tracepoint` — one of the standardized values above (defaults to `FLOW_START` if absent; must be explicit when context requires a different value)
+- `category` — one of the three `com.insulet.*` packages (auto-set by connector based on operation if absent; must be explicit if overriding the default)
+
+## Error Handler Logging Pattern
+
+Error handlers must include **two** logger entries:
+1. **INFO logger** (`build-error-log-without-payload`, category `com.insulet.general`): error context with `errorType`, `errorDescription`, `cause`, `errorCode` — no payload
+2. **DEBUG logger** (`build-error-log-with-masked-payload` or `build-error-log-with-encrypted-payload`): protected payload for triage
+
+## Log4j2 Configuration (`log4j2.xml`)
+
+Projects use a **single `log4j2.xml` file** — env-specific files are not required. The three categories must be declared as `AsyncLogger` entries:
+
+```xml
+<AsyncLogger name="com.insulet.general" level="INFO" />
+<AsyncLogger name="com.insulet.maskedpayload" level="DEBUG" />
+<AsyncLogger name="com.insulet.encryptedpayload" level="DEBUG" />
+```
+
+- For PROD deployments, consider Maven resource filtering or deployment configuration to set `com.insulet.*` categories to WARN when needed
+- PROD `DEBUG` is only allowed temporarily during active triage — **must be reverted** after investigation
+
+## Global Connector Configuration
+
+Verify the global config element includes:
+- `sensitiveKeyParts` — comma-separated fragments identifying sensitive fields (e.g., `ssn,password,secret,token`)
+- `safeKeys` — keys to exclude from masking (e.g., `passwordPolicy`)
+- `encryptionKey` — Base64-encoded 256-bit AES key (**must** come from secure vault, never hardcoded)
+
+## Review Checklist
+- [ ] All loggers use `module-logger` (no built-in Mule `logger`)
+- [ ] No `category` attribute is **mismatched** with its operation (Major). Absent `category` is acceptable — connector auto-sets the correct default (Minor: recommend explicit for readability)
+- [ ] INFO-level logs use only "Without Payload" operations
+- [ ] DEBUG-level logs use only masked or encrypted operations (never raw payload)
+- [ ] No `tracepoint` is **incorrect for its context** (Major). Absent `tracepoint` defaults to `FLOW_START` — flag as Major only when the context requires a different value (e.g., error handlers need `EXCEPTION`, exit loggers need `FLOW_END`)
+- [ ] `sourceSystem` and `targetSystem` set on every logger
+- [ ] Error handlers have both INFO (context) and DEBUG (payload) log entries
+- [ ] Single `log4j2.xml` declares all three `AsyncLogger` categories (no env-specific log4j files required)
+- [ ] When PROD requires reduced verbosity, categories are set to WARN via filtering or deployment config
+- [ ] `sensitiveKeyParts` and `encryptionKey` configured in global connector config
+- [ ] `entityDetails` contains only non-sensitive business identifiers

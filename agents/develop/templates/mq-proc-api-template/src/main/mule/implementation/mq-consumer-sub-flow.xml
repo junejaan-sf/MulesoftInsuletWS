@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:tracing="http://www.mulesoft.org/schema/mule/tracing"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/tracing http://www.mulesoft.org/schema/mule/tracing/current/mule-tracing.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	    mq-consumer-sub-flow
+	    Called from: mq-consumer-flow (mq-proc-api-template.xml)
+
+	    Flow shape (consents-proc-api pattern):
+	      1. Set mqAckToken, deliveryCount, originalPayload, transactionId, messageId
+	      2. tracing:with-correlation-id (from attributes.properties.correlationId)
+	      3. p-request-context-vars-mq.dwl → vars.requestContext
+	      4. LOG INFO received (no payload)
+	      5. LOG DEBUG received (encrypted — payload + MQ properties)
+	      6. p-mq-message-transform.dwl → payload (pass-through placeholder — replace with real mapping)
+	      7. v-targetApiParams-{downstream-sys-api}.dwl → vars.targetApiParams
+	      8. {downstream-sys-api}-request-flow
+	      9. responding-ack-sub-flow (explicit ACK — MANUAL ack mode)
+	     10. LOG EXIT FLOW_END
+
+	    IMPORTANT — Replace the following with real implementation:
+	      - p-mq-message-transform.dwl: add field mapping from MQ payload to downstream request shape
+	      - v-targetApiParams-{downstream-sys-api}.dwl: update path, method, headers for your target system
+	      - {downstream-sys-api}-request-flow: rename to actual downstream flow name
+	-->
+	<sub-flow name="mq-consumer-sub-flow" doc:name="mq-consumer-sub-flow">
+
+		<!--
+		    Step 1: Capture MQ message metadata before any transform overrides the attributes.
+		    mqAckToken   — required for explicit ACK/NACK (MANUAL ack mode)
+		    deliveryCount — used for delivery-count threshold check in error handler
+		    originalPayload — preserved for DLQ and error logging
+		    transactionId — from MQ correlationId property (falls back to Mule correlationId)
+		    messageId    — unique MQ message identifier
+		-->
+		<ee:transform doc:name="Set mqAckToken, deliveryCount, originalPayload, transactionId, messageId">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable variableName="mqAckToken"><![CDATA[attributes.ackToken]]></ee:set-variable>
+				<ee:set-variable variableName="deliveryCount"><![CDATA[attributes.deliveryCount default 1]]></ee:set-variable>
+				<ee:set-variable variableName="originalPayload"><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-variable>
+				<ee:set-variable variableName="transactionId"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.properties.correlationId default correlationId]]></ee:set-variable>
+				<ee:set-variable variableName="messageId"><![CDATA[%dw 2.0
+output application/json
+---
+attributes.messageId]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+		<!--
+		    Step 2: Override correlation ID for this message's trace context.
+		    All subsequent log entries within this scope share the MQ correlationId.
+		-->
+		<tracing:with-correlation-id
+			doc:name="With Correlation ID"
+			correlationId="#[attributes.properties.correlationId default correlationId]">
+
+			<!--
+			    Step 3: Set requestContext from MQ attributes.
+			    sourceSystem resolved from attributes.properties.sourceSystem,
+			    then properties file fallback. entityDetails includes transactionId and messageId.
+			    See p-request-context-vars-mq.dwl for full structure.
+			-->
+			<ee:transform doc:name="Set MQ Request Context">
+				<ee:message />
+				<ee:variables>
+					<ee:set-variable resource="dwls/p-request-context-vars-mq.dwl" variableName="requestContext" />
+				</ee:variables>
+			</ee:transform>
+
+			<!-- Step 4: LOG INFO — no payload (safe for PROD) -->
+			<module-logger:build-log-without-payload
+				doc:name="Log Received Message from MQ"
+				config-ref="custom-logger-connector_config"
+				message="Received message from MQ queue"
+				entityDetails="#[vars.requestContext.entityDetails default null]"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]" />
+
+			<!-- Step 5: LOG DEBUG — encrypted payload + MQ properties -->
+			<module-logger:build-log-with-encrypted-payload
+				doc:name="Log MQ Message Received"
+				config-ref="custom-logger-connector_config"
+				message="Received message from MQ queue"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				entityDetails="#[vars.requestContext.entityDetails default null]">
+				<module-logger:body><![CDATA[#[output application/json ---
+{
+    payload: payload,
+    properties: attributes.properties default {}
+}]]]></module-logger:body>
+			</module-logger:build-log-with-encrypted-payload>
+
+			<!--
+			    Steps 6–7: Transform payload and set targetApiParams.
+			    p-mq-message-transform.dwl — maps MQ payload to downstream request body.
+			      REPLACE with actual field mapping for your integration.
+			    v-targetApiParams-{downstream-sys-api}.dwl — sets method, path, headers.
+			      REPLACE {downstream-sys-api} with actual system name.
+			-->
+			<ee:transform doc:name="Transform Payload and Set Target API Params">
+				<ee:message>
+					<ee:set-payload resource="dwls/p-mq-message-transform.dwl" />
+				</ee:message>
+				<ee:variables>
+					<ee:set-variable resource="dwls/v-targetApiParams-{downstream-sys-api}.dwl" variableName="targetApiParams" />
+				</ee:variables>
+			</ee:transform>
+
+			<!-- Step 8: Call downstream sys API -->
+			<flow-ref doc:name="Flow Reference to {downstream-sys-api}-request-flow"
+				name="{downstream-sys-api}-request-flow" />
+
+			<!-- Step 9: Explicit ACK — message processed successfully -->
+			<flow-ref doc:name="Flow Reference to responding-ack-sub-flow"
+				name="responding-ack-sub-flow" />
+
+			<!-- Step 10: LOG EXIT -->
+			<module-logger:build-log-without-payload
+				doc:name="Log Message Processed and ACKed"
+				config-ref="custom-logger-connector_config"
+				message="Message processed successfully and ACKed"
+				tracepoint="FLOW_END"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				entityDetails="#[vars.requestContext.entityDetails default null]" />
+
+		</tracing:with-correlation-id>
+	</sub-flow>
+
+</mule>

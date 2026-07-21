@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd">
+
+	<!--
+	     UPDATE RECORD SUB-FLOW — PUT /records/{id}
+
+	     Pattern  (mirrors update-provider-accounts.xml from sfl-crm-persona-sys-api):
+	       1. (Optional) validation:is-true — require uriParams.id or body identifier
+	       2. Transform request body + uriParams.id → SF sObject array  (p-update-record-request.dwl)
+	          simultaneously set vars.upsertRequestDetails inline
+	       3. LOG BEFORE REQUEST — encrypted, BEFORE_SALESFORCE
+	       4. execute-sf-upsert-flow
+	       5. LOG AFTER REQUEST  — encrypted, AFTER_SALESFORCE
+	       6. Choice on payload.items[0].payload.success
+	            when true  → set final payload (p-update-record-response.dwl) + httpStatus='200'
+	            otherwise  → set-variable recordUpdateStatus, raise APP:RECORD_UPDATE_FAILED
+
+	     NOTE: Use execute-sf-update-flow instead when updating by SF Id only (no external ID).
+	-->
+	<sub-flow name="update-record-sub-flow" doc:id="11111111-cccc-4444-dddd-ee0000000001">
+
+		<!-- Uncomment when the URI parameter 'id' is required:
+		<validation:is-true
+			doc:name="Validate URI Param id Present"
+			doc:id="22222222-cccc-4444-dddd-ee0000000002"
+			config-ref="validation_config"
+			expression="#[!isEmpty(attributes.uriParams.id default '')]"
+			message="URI parameter 'id' is required" />
+		-->
+
+		<ee:transform doc:name="DW Transform Update Record Request" doc:id="33333333-cccc-4444-dddd-ee0000000003">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-update-record-request.dwl" />
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable variableName="upsertRequestDetails"><![CDATA[%dw 2.0
+output application/java
+---
+{
+    sobjectName: Mule::p('sfl.sfObjectName'),
+    externalId: "Id"
+    // Replace "Id" with a custom external ID field name when upserting by external key,
+    // e.g., externalId: "Legacy_ID__c"
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG BEFORE REQUEST"
+			doc:id="44444444-cccc-4444-dddd-ee0000000004"
+			config-ref="custom-logger-connector_config"
+			message="Executing SFDC upsert request for record"
+			tracepoint="BEFORE_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- payload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<flow-ref
+			doc:name="execute-sf-upsert-flow"
+			doc:id="55555555-cccc-4444-dddd-ee0000000005"
+			name="execute-sf-upsert-flow" />
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG AFTER REQUEST"
+			doc:id="66666666-cccc-4444-dddd-ee0000000006"
+			config-ref="custom-logger-connector_config"
+			message="Response from SFDC upsert request for record"
+			tracepoint="AFTER_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- payload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<choice doc:name="Is Update Successful?" doc:id="77777777-cccc-4444-dddd-ee0000000007">
+			<when expression="#[(payload.items[0].payload.success as Boolean) default false]">
+				<ee:transform doc:name="DW Set Update Record Response" doc:id="88888888-cccc-4444-dddd-ee0000000008">
+					<ee:message>
+						<ee:set-payload resource="dwls/p-update-record-response.dwl" />
+					</ee:message>
+				</ee:transform>
+				<set-variable
+					value="'200'"
+					doc:name="Set HTTP Status 200"
+					doc:id="99999999-cccc-4444-dddd-ee0000000009"
+					variableName="httpStatus" />
+			</when>
+			<otherwise>
+				<set-variable
+					value="#[(payload.items.payload.errors[0][0].statusCode) default '']"
+					doc:name="Set recordUpdateStatus"
+					doc:id="aaaaaaaa-cccc-4444-dddd-ee0000000010"
+					variableName="recordUpdateStatus" />
+				<raise-error
+					doc:name="RAISE APP:RECORD_UPDATE_FAILED"
+					doc:id="bbbbbbbb-cccc-4444-dddd-ee0000000011"
+					type="APP:RECORD_UPDATE_FAILED"
+					description='#[output application/json --- (payload.items[0].payload.errors[0].message default "SF upsert returned success=false")]' />
+			</otherwise>
+		</choice>
+
+	</sub-flow>
+
+</mule>

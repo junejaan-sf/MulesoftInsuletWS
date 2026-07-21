@@ -1,0 +1,17 @@
+{
+    "items": [
+        {
+            "payload": {
+                "success": false,
+                "id": null,
+                "errors": [
+                    {
+                        "message": "Required fields are missing: [Name]",
+                        "statusCode": "REQUIRED_FIELD_MISSING",
+                        "fields": ["Name"]
+                    }
+                ]
+            }
+        }
+    ]
+}

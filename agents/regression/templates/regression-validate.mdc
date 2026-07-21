@@ -1,0 +1,320 @@
+---
+description: Triggers a generic Salesforce regression validation (any Mule API) when the user names an API or supplies an explicit ruleset path. For the patient-specific flow, see `regression-validate-patient-upsert.mdc` instead.
+globs: 
+alwaysApply: false
+---
+
+# Generic Salesforce Regression Validation (any Mule API)
+
+When the user's request matches any of these phrases — **and they either name a
+non-patient API or supply an explicit `ruleset_path`** — treat it as an
+instruction to execute the regression validation procedure below.
+
+Trigger phrases (the user must additionally name a target API or supply a
+`ruleset_path`; otherwise yield to a more specific runner such as
+`regression-validate-patient-upsert.mdc`):
+
+- "validate this payload against salesforce for `<api-name>`"
+- "regression test `<api-name>` against `<org>`"
+- "verify SF records for payload `<path-or-inline>` using ruleset `<path>`"
+- "regress `<api-name>` upsert against `<org>`"
+- "run the generic regression harness on `<payload>` with `<ruleset>`"
+
+If the user mentions `na-patient-proc-api`, "patient flow", or "patient upsert"
+and does **not** override with an explicit `ruleset_path`, defer to
+[`regression-validate-patient-upsert.mdc`](mdc:.cursor/rules/regression-validate-patient-upsert.mdc).
+
+The single source of truth for what to verify is the YAML rule catalog at
+`ruleset_path` (the user-supplied or inferred path). The grammar and supported
+filters/predicates are documented in
+[`regression-tooling/RULESET-SCHEMA.md`](mdc:regression-tooling/RULESET-SCHEMA.md)
+and [`regression-tooling/TRANSFORMS.md`](mdc:regression-tooling/TRANSFORMS.md).
+Read those two documents in full before proceeding.
+
+## Procedure
+
+1. **Resolve inputs**
+   - `ruleset_path` — resolution order:
+     1. An explicit path the user typed (relative to workspace root or
+        absolute).
+     2. `regression-tooling/<api-name>/ruleset.yaml` if the user named an API.
+     3. If still ambiguous, ask the user which ruleset to use; do not guess.
+   - `payload` — a file path or inline JSON. If the user passed only a payload
+     name without a path, look under
+     `regression-tooling/<ruleset.name>/samples/`. If they pasted JSON inline,
+     accept it directly.
+   - `org_alias` — defaults to `ruleset.default_org_alias`. If the user gave a
+     different alias, use it.
+   - `since_iso` — the lower bound for any `mode: negative` rule that uses
+     `{{ context.since_iso }}`. Default = "now() - 24h" in UTC ISO-8601. If
+     the user supplied a timestamp, use that.
+   - If `payload` is ambiguous (multiple files match the name) ask the user
+     which one. Otherwise proceed without further questions.
+
+2. **Load the ruleset**
+   - Read the file at `ruleset_path`.
+   - Validate that every `depends_on` references a known rule id.
+   - Build the topological order so each rule runs only after its
+     dependencies. Within the same dependency layer, preserve the YAML order.
+   - From here on, treat `ruleset.name` as the canonical API identifier
+     (used in report titles, output paths, and the bar chart's per-family
+     bucketing).
+
+3. **Initialize state**
+   - `payload` = parsed JSON
+   - `consts` = the `ruleset.consts` map
+   - `captures` = `{}`
+   - `context` = `{ since_iso: <resolved>, run_id: <iso-timestamp> }`
+   - `results` = `[]`
+
+4. **Run each rule in topo order**
+   For each `rule`:
+
+   a. **Top-level gate** — evaluate `rule.when`. If false, append
+      `{rule.id, status: SKIPPED_GATE, reason: rule.when}` and continue.
+
+   b. **Pick a lookup** — walk `rule.lookup` in order. For each entry:
+      - Evaluate its inner `when` (default `always`). Skip if false.
+      - Render `soql` by substituting `{{ payload.X }}`,
+        `{{ captures.X.Y }}`, `{{ consts.X }}`, `{{ context.X }}` and
+        applying any pipe filters. Filter definitions live in
+        [`regression-tooling/TRANSFORMS.md`](mdc:regression-tooling/TRANSFORMS.md).
+      - Call the `user-salesforce-dx` MCP tool `run_soql_query` with:
+        ```json
+        {
+          "query": "<rendered SOQL>",
+          "usernameOrAlias": "<org_alias>",
+          "directory": "<workspace-root>"
+        }
+        ```
+      - If the MCP call returns an error, stop searching further lookups for
+        this rule and record `{rule.id, soql: <rendered>, error: <message>}`.
+        At step `d`, if `expect.allow_skip_when` exists and evaluates true,
+        downgrade to `SKIPPED_OPTIONAL`; otherwise final status is
+        `FAIL_SOQL`.
+      - On success, if `records.length >= effective_min_count(rule.expect.record_count)`,
+        use this lookup's result and stop. (`effective_min_count` is 1 when
+        operator is `==N`, `>=N`, `<=N`, plain `N`; the count check is done in
+        step `d` regardless — this is just "did we find enough to proceed".)
+      - If no lookup satisfied the count, the first lookup's result (even if
+        empty) is used so that `record_count` / `allow_skip_when` can be
+        evaluated in step `d`.
+
+   c. **Missing-capture short-circuit** — if any template referenced a capture
+      that doesn't exist in `captures` (e.g. `captures.parentAccount.Id`
+      when `parentAccount` was never captured), append
+      `{status: FAIL_MISSING_CAPTURE, missing: <id>}` and continue.
+
+   d. **Record-count assertion** — compare `records.length` against
+      `rule.expect.record_count` (operators: `==N`, `>=N`, `<=N`, or bare `N`
+      meaning `==N`).
+      - For `mode: negative`: if count is 0, status `PASS`; otherwise
+        `FAIL_UNEXPECTED_RECORDS` and include each offending row in the
+        result.
+      - For normal rules: if count fails AND `expect.allow_skip_when` exists
+        and evaluates true, status `SKIPPED_OPTIONAL` and insert a sentinel
+        `{ Id: null, __skipped__: true }` into `captures.<capture_as>` (if
+        `capture_as` is set). If count fails and no skip clause matches,
+        status `FAIL_RECORD_COUNT` — do not evaluate field-level assertions.
+
+   e. **Field assertions** — for each entry in `rule.expect.fields`:
+      - Short form (`Field: "<template>"`): always asserted, strict-equal.
+      - Long form (`Field: {value, when?, case_insensitive?}`): assert only
+        if `when` is true (default `always`). `case_insensitive` defaults to
+        `false`.
+      - Render the expected value (template + filters).
+      - Read the actual value from `records[0]`. For dotted paths
+        (e.g. `RecordType.Name`), navigate nested objects.
+      - Compare as strings: by default
+        `String(expected) === String(actual)`. When `case_insensitive: true`,
+        compare `String(expected).toLowerCase() === String(actual).toLowerCase()`
+        instead. `null` / missing actual is rendered as `""` for comparison
+        purposes (so an expected `""` matches a missing field).
+      - Mismatch detail rows in the report MUST show the raw expected and
+        actual values verbatim — `case_insensitive` only affects the
+        PASS/FAIL decision, never the report rendering.
+      - Collect every mismatch.
+      - If any mismatch, status `FAIL_FIELDS`; else `PASS` (or
+        `PASS_RECORD_ONLY` if `expect.fields` was empty).
+
+   f. **Capture** — if `rule.capture_as` is set AND status is `PASS` or
+      `PASS_RECORD_ONLY` or `FAIL_FIELDS`, store `records[0]` into
+      `captures.<capture_as>` (downstream rules can still query against this
+      record even if some of its fields failed assertion).
+
+5. **Generate the markdown report**
+   Produce a self-contained markdown report. Do not include a pass-rate
+   percentage anywhere. Include:
+
+   - Run metadata header: ruleset name, API version, org alias, payload label,
+     captured root-entity Id (the first `capture_as` declared in the ruleset,
+     by convention the "primary" record — e.g. `patientAccount`, `accountLead`,
+     `orderHeader`, etc.), run start, `since_iso`, duration.
+   - Summary table with counts per status. Compute `Overall verdict`:
+     - `PASS` if zero `FAIL_*` statuses.
+     - `FAIL` otherwise (include the count of failing rules).
+   - Counts-by-object-family table. Derive families from `rule.object`:
+     bucket rules by their `object:` field; if more than 12 distinct objects,
+     merge the smallest tail into a single "Other" bucket.
+   - One per-rule section in topo order. For each rule include the object,
+     captured-as name, record count, lookup chosen (when multiple), and a
+     field-level table for asserted rules. For any `FAIL_*` rule add a
+     "Failure detail" code block containing the rendered SOQL and the
+     offending comparison(s) so a human can re-execute the query manually.
+
+6. **Generate the HTML report (sibling of the markdown)**
+   Always produce a presentable, self-contained HTML report next to the
+   markdown. Use [`agents/regression/templates/report-template.html`](mdc:agents/regression/templates/report-template.html)
+   as the canonical skeleton. The template is fully styled (inline CSS, inline
+   SVG charts, no external assets) and uses `{{TOKEN}}` placeholders that you
+   substitute.
+
+   a. **Header tokens** (single-value substitutions):
+      `{{TITLE}}` — e.g. `"Salesforce Regression Run - <ruleset.name> - <payload-label>"`.
+      `{{RULESET_NAME}}`, `{{ORG_ALIAS}}`, `{{API_VERSION}}`,
+      `{{PAYLOAD_LABEL}}`, `{{RUN_TIMESTAMP}}`, `{{SINCE_ISO}}`.
+      The template's patient-specific tokens (`{{PATIENT_ID}}`,
+      `{{PATIENT_NAME}}`, `{{EXT_ASPN_ID}}`) should be replaced with the
+      equivalent for the current API:
+      - `{{PATIENT_ID}}` -> the captured Id of the primary entity (first
+        `capture_as` declared in the ruleset).
+      - `{{PATIENT_NAME}}` -> a one-line human label for that entity
+        (e.g. `"<FirstName> <LastName>"`, `"Order <OrderNumber>"`,
+        `"Lead <ExtLeadId>"`).
+      - `{{EXT_ASPN_ID}}` -> the most distinctive external identifier in the
+        payload (whatever the ruleset's primary lookup keys on).
+      If your ruleset has no obvious counterpart for any of these, render
+      that header pill as `"-"` rather than leaving the token unresolved.
+      Set `{{VERDICT_TONE}}` to `pass` when zero `FAIL_*` statuses, else `fail`.
+      Set `{{VERDICT_TEXT}}` to `"PASS"` or `"FAIL (N of TOTAL)"`.
+
+   b. **Stat tokens**:
+      `{{STAT_TOTAL}}`, `{{STAT_PASS}}`, `{{STAT_FAIL}}`, `{{STAT_SKIPPED}}`.
+      `STAT_FAIL` is the sum of `FAIL_FIELDS + FAIL_RECORD_COUNT +
+      FAIL_UNEXPECTED_RECORDS + FAIL_MISSING_CAPTURE + FAIL_SOQL`.
+      `STAT_SKIPPED` is `SKIPPED_GATE + SKIPPED_OPTIONAL`.
+      **Do not** add or surface a pass-rate percentage anywhere.
+
+   c. **Donut chart** (`{{DONUT_SLICES}}`, `{{DONUT_LEGEND_ITEMS}}`):
+      Use up to 4 visual slices: Pass (tone `success`), Fail (tone `danger`),
+      Skipped-gate (tone `neutral`), Skipped-optional (tone `info`).
+      Follow the exact stroke-dasharray math documented in the comment at the
+      top of `report-template.html`. Render one `<circle>` per non-zero
+      slice; skip zero-value slices. Render one `<li>` per non-zero slice in
+      `{{DONUT_LEGEND_ITEMS}}` as
+      `<li><span class="swatch tone-<tone>"></span>Label<span class="count">N</span></li>`.
+
+   d. **Stacked bar chart** (`{{Y_TICK_MAX}}`, `{{Y_TICK_MID}}`,
+      `{{BAR_GROUPS}}`, `{{BAR_X_LABELS}}`):
+      Bucket the rules by `rule.object` (the sObject API name). If there are
+      more than 12 distinct objects, merge the smallest tail into a single
+      "Other" bucket. For each bucket compute `passCount`, `skippedCount`
+      (gate + optional), `failCount`. Pick `yMax` as the smallest of
+      `{5, 10, 20, 30, 50}` that is `>= max(bucket totals)`.
+      Set `{{Y_TICK_MAX}}=yMax`, `{{Y_TICK_MID}}=yMax/2`. Use the math from
+      the template comment to compute bar coordinates and emit one
+      `<g class="bar-group">` per bucket containing up to 3 `<rect>`
+      elements (omit zero-height rects). In `{{BAR_X_LABELS}}` emit one
+      `<text>` per bucket centred under its bar. Truncate long sObject names
+      to 16 chars for the x-label.
+
+      Alternative bucketing: if the ruleset author has declared an optional
+      `families:` map at the top level (`families: { FamilyName: [rule-id, ...] }`),
+      use that instead of bucketing by `object:`. This lets API owners give
+      pretty names like `"Patient Account"` or `"Order Lines"`.
+
+   e. **Entity rows** (`{{ENTITY_ROWS}}`):
+      For every rule with a non-empty `captures.<id>` whose status is
+      `PASS`, `PASS_RECORD_ONLY`, or `FAIL_FIELDS`, emit a row:
+      `<tr><td><strong>Entity label</strong></td><td>From-payload summary</td><td><code>SalesforceId</code></td></tr>`.
+      Skip captures with `__skipped__` sentinel. Use a human-friendly label
+      derived from `rule.object` and `rule.capture_as`. The "From payload"
+      cell is a short summary of the payload fields that identify the record.
+
+   f. **Rule rows** (`{{RULE_ROWS}}`):
+      One `<tr class="row-tone-<tone>">` per rule, in topo order. Tone map:
+      `PASS` -> `success`, `FAIL_*` -> `danger`, `SKIPPED_GATE` -> `neutral`,
+      `SKIPPED_OPTIONAL` -> `info`. Cells:
+      `<td class="num">N</td><td><code>rule.id</code></td><td>rule.object</td>
+       <td><span class="pill size-sm tone-<tone>">label</span></td>
+       <td class="num">records-count</td><td>one-line note</td>`.
+      Status labels: `"Pass"`, `"Fail"`, `"Skipped (gate)"`,
+      `"Skipped (optional)"`. The note is the most useful one-line summary
+      (matched IDs for PASS, mismatch summary for FAIL, gate expression for
+      SKIPPED_GATE, allow_skip_when justification for SKIPPED_OPTIONAL).
+
+   g. **Failure detail section** (`{{FAILURE_DETAIL_SECTION}}`):
+      If `STAT_FAIL == 0`, replace the section with the empty string AND
+      delete the `<!--BEGIN failure-detail-->` / `<!--END failure-detail-->`
+      bracket comments (omit the whole `<section>` block).
+      Otherwise render a `<section>` containing:
+      - A `<div class="callout">` summarising the failures.
+      - One `<article class="card">` per failing rule, with a per-field
+        table (Field / Expected / Actual / Severity) using `row-tone-danger`
+        for real defects and `row-tone-warning` for normalisation-style
+        mismatches, followed by a `<div class="field-causes">` with a short
+        cause paragraph per field.
+
+   h. **Follow-ups grid** (`{{FOLLOWUPS_GRID}}`):
+      If you have no recommendations, omit the entire section the same way
+      as failure-detail. Otherwise emit one `<article class="followup">`
+      per recommendation:
+      ```
+      <article class="followup">
+        <header>
+          <h3>Title</h3>
+          <span class="pill size-sm tone-<tone>">P0 | P1 | v1.1 | ...</span>
+        </header>
+        <p>Body sentence...</p>
+        <p class="caption">Owner / file refs.</p>
+      </article>
+      ```
+
+   i. **Footer tokens**: `{{MARKDOWN_REPORT_PATH}}` is the relative path of
+      the persisted `.md` sibling.
+
+   j. **Final pass**: scan the rendered HTML for any unresolved `{{...}}`
+      tokens or empty SVG elements and replace/remove them.
+
+7. **Persist + present**
+   - Write the markdown report to
+     `project/output_regression/<ruleset.name>-sf-validation/<run_id>-<payload-basename>.md`
+     (slugify the payload basename — replace `/` with `__` and drop `.json`).
+     Create the directory if it does not exist.
+   - Write the HTML report to the same path with `.html` extension.
+   - Print the full markdown report inline so the user sees it in chat.
+   - At the very end, print a single one-line summary like:
+     `Verdict: FAIL (1/17 rules failed). Reports saved to <md-path> and <html-path>.`
+
+## Conventions and constraints
+
+- Do not modify the loaded `ruleset.yaml` unless the user explicitly asks. If
+  you detect a systematic mismatch (e.g. a field name that was renamed in
+  Salesforce), surface it as a `FAIL_SOQL` finding and suggest the change in
+  chat — do not auto-fix.
+- Treat the rendered SOQL as a literal string passed to the MCP. The MCP
+  enforces query limits; do not paginate or chunk results unless a rule's
+  `expect.record_count` is `<=N` with `N > 200`.
+- All SOQL must be valid for the API version declared in
+  `ruleset.api_version`.
+- Long-text Salesforce columns are not SOQL-filterable. If a rule needs to
+  inspect such columns (e.g. `Error_Message__c`, `Payload_Data__c`,
+  `Response_Data__c`), only the identifier columns are usable in the
+  `WHERE` clause. The rule body's `description:` should call this out.
+
+## Onboarding a new API to the catalog
+
+To wire up a new API (e.g. `na-orders-proc-api`):
+
+1. Create `regression-tooling/<api-name>/ruleset.yaml`. Start from the
+   template at [`agents/regression/templates/ruleset.yaml`](mdc:agents/regression/templates/ruleset.yaml).
+   Replace the `<<placeholder>>` tokens and adapt or delete the seed rules.
+2. Drop sample payload JSONs under
+   `regression-tooling/<api-name>/samples/`.
+3. Invoke this runner with a trigger phrase that names the API or supplies
+   the ruleset path. Reports auto-persist under
+   `project/output_regression/<api-name>-sf-validation/`.
+4. (Optional) If you want a single-phrase shortcut tailored to your API,
+   add a thin Cursor rule file like
+   `regression-validate-<api-name>.mdc` that simply hardcodes
+   `ruleset_path` and delegates to this procedure verbatim.

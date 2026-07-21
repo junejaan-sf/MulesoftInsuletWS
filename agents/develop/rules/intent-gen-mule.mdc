@@ -1,0 +1,114 @@
+---
+description: Triggers Mule flow and logic generation when the user asks to generate, create, scaffold, build, or implement Mule flows, sub-flows, or DataWeave scripts
+globs: 
+alwaysApply: false
+---
+
+# Mule Flow & Logic Generation Intent
+
+When the user's request is about **generating**, **creating**, **scaffolding**, **building**, or **implementing** Mule flows, sub-flows, DataWeave transformations, or integration logic, use this intent to guide the process.
+
+---
+
+## STEP 0 — Identify Integration Pattern (do this FIRST, before reading any files)
+
+Read the requirements, RAML spec, or Confluence design from `project/input_develop/` and determine which integration pattern applies. State the identified pattern explicitly before proceeding.
+
+| Pattern | Use when | Template directory |
+|---------|----------|--------------------|
+| Pattern 3.2 — Anypoint MQ consumer | API subscribes to a queue (MANUAL ack, circuit breaker, DLQ routing) | `agents/develop/templates/mq-proc-api-template/` |
+| Pattern 3.1 — HTTP proc API | Synchronous HTTP listener, APIKit router, downstream sys API calls | `agents/develop/templates/http-proc-api-template/` |
+| Pattern 3.3 — Salesforce PubSub | Subscribes to a Salesforce platform event channel | `agents/develop/templates/sf-pubsub-exp-api-template/` |
+| SF HTTP sys API | HTTP listener calling Salesforce composite/REST API | `agents/develop/templates/sf-http-sys-api-template/` |
+
+---
+
+## MANDATORY PREFLIGHT — Read ALL files below before generating a single line
+
+**STOP. Do not generate any XML, DWL, POM, or properties until every file in this list has been read.**
+
+### From the matched template directory — read ALL of these:
+
+- `pom.xml` — **canonical dependency list**; it only declares what the parent POM does NOT already provide; copy its structure exactly, do not add or remove dependencies without explicit justification
+- `src/main/mule/{template-name}.xml` — canonical flow/consumer structure, namespace declarations, `xmlns:doc`, error-handler wiring
+- `src/main/mule/common/global-config.xml` — canonical global config: property loading, `<configuration defaultErrorHandler-ref>`, HTTP listener, APIKit, AKV, logger, notification, MQ, circuit breaker, Object Store configs
+- `src/main/mule/common/global-error-handler.xml` — canonical error handler branches, `module-error-handler-plugin:process-error`, DLQ, notification, `check-for-raise-error-sub-flow`
+- `src/main/mule/common/common-connectivity.xml` — canonical HTTP request flow: `until-successful`, `success`/`errorDetails` pattern, `vars.targetApiParams.requestMethod / requestPath / requestPayload / headers / queryParams / uriParams`
+- `src/main/mule/common/common-utility.xml` — canonical utility sub-flows: `responding-ack-sub-flow`, `common-log-integration-error-details-sub-flow`, `publish-to-dlq-sub-flow`, `send-notification-sub-flow` (`module-notification:call-notification-api`), `success-response-sub-flow`
+- `src/main/mule/implementation/*.xml` — all sub-flow files (canonical patterns for schema validation, identity resolution, scatter-gather, result handling)
+
+### From rules — read ALL of these:
+
+- `agents/develop/rules/implementation-ruleset_v4.mdc` — **read in full, all sections**
+- `agents/review/rules/review-pom-maven-standards.mdc`
+- `agents/review/rules/review-mule-global-config.mdc`
+- `agents/review/rules/review-error-handling.mdc`
+- `agents/review/rules/review-logging-standards.mdc`
+- `agents/review/rules/review-dataweave-standards.mdc`
+- `agents/review/rules/review-properties-config.mdc`
+- `agents/review/rules/review-security-standards.mdc`
+- `agents/review/rules/review-mule-flow-naming.mdc`
+
+**Do not start generating until every file above has been read.**
+
+---
+
+## Procedure
+
+1. Complete Step 0 (pattern identification) and the Mandatory Preflight above.
+
+2. **Check `project/input_develop/` for pre-fetched JIRA and Confluence context files:**
+   - **If `jira-*.md` and `confluence-design-*.md` are both present:** Read them immediately. Do NOT re-fetch from JIRA or Confluence.
+   - **If either or both files are missing:** Inform the user which file(s) are absent and ask: *"No pre-fetched JIRA/Confluence context was found in `project/input_develop/`. Would you like me to fetch it now? If yes, please provide the JIRA story ID."*
+   - **If the user provides a JIRA story ID:** Fetch the JIRA story and its linked Confluence page, then save `jira-{STORY-ID}.md` and `confluence-design-{STORY-ID}.md` to `project/input_develop/` before proceeding.
+   - **If the user says to proceed without:** Continue using only the RAML spec and any other files present in `project/input_develop/`.
+
+3. **Derive business logic from available sources** — follow the Source Precedence model in `implementation-ruleset_v4.mdc §2a` exactly:
+
+   a. **If a flow/sequence/arch diagram was provided** (Mermaid code or image): use it as the primary orchestration structure. Extract participant names, message sequence, and branching conditions from it.
+
+   b. **Always extract from Confluence/JIRA context files** (whether or not a diagram exists):
+      - **Data-flow narrative** (Flow Overview / numbered steps) → orchestration order and sub-flow names
+      - **Field-mapping tables** → list of `p-*.dwl` and `v-*.dwl` files to create, with their populated field expressions
+      - **Business Rules & Validations** → conditional routing (`<choice>` branching), scope filters, counter/state update stubs
+      - **Field Validations table** → inputs for `validate-input-sub-flow` raising `APP:BAD_REQUEST`
+      - **HTTP Status Codes table** → additional entries in `errors/customErrors.dwl`
+      - **Downstream Systems table** → connectivity configs, property keys, and auth-caching flows to create
+
+   c. **When both a diagram and Confluence context files exist:** combine — diagram drives flow shape and order; Confluence text drives DataWeave expressions, validation logic, and error conditions.
+
+   d. **When NO diagram is provided but Confluence/JIRA context files ARE present:**
+      - Build a Mermaid `sequenceDiagram` from the data-flow narrative.
+      - Include: all participants, the happy-path sequence, and the error/DLQ path.
+      - Present it to the user: *"I derived this sequence diagram from the Confluence design. Please review — reply 'approved' to proceed, or describe any corrections."*
+      - **Do not write any Mule XML or DWL until the user confirms.** After approval, implement using the confirmed diagram plus all derived mapping/rule data.
+
+   e. **Only scaffold empty stubs** when neither a diagram nor Confluence/JIRA context is available.
+
+4. **Build the implementation plan** (state it in chat before writing files):
+   - List every file that will be created/modified
+   - For each `p-*.dwl`, list the fields it will contain (derived from mapping tables)
+   - Identify which business rules map to which sub-flows
+   - Call out any genuinely ambiguous mappings that need user input before proceeding
+
+5. **Generate Mule artifacts** following the standards — every generated file must match the template structure read in the Mandatory Preflight and must be populated from the derived business logic (not left as empty scaffolds).
+
+## Generation Scope
+
+- Mule XML flow files under `src/main/mule/`
+- Global configuration in `src/main/mule/common/global-config.xml`
+- Error handler in `src/main/mule/common/global-error-handler.xml`
+- DataWeave scripts under `src/main/resources/dwls/`
+- Error mappings under `src/main/resources/errors/`
+- Property files under `src/main/resources/properties/`
+- `log4j2.xml` configuration
+
+## Handoff — After Generation
+
+After all files have been written, suggest the next step to the user. Do **not** invoke it automatically:
+
+```
+Generation complete. To validate the build, run /use-build in a new chat.
+It will run mvn clean package with the Insulet canonical VM args and auto-fix any
+schema, POM, property, or DataWeave compile errors it finds.
+```

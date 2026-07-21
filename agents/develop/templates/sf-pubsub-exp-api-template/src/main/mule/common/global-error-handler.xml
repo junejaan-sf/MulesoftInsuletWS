@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-error-handler-plugin="http://www.mulesoft.org/schema/mule/module-error-handler-plugin"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/module-error-handler-plugin http://www.mulesoft.org/schema/mule/module-error-handler-plugin/current/mule-module-error-handler-plugin.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	    Global Error Handler — referenced by all flows in this application.
+	    Handles all unhandled errors using the v3 canonical dual-log pattern:
+	    1. process-error  — maps error type to HTTP status + response body
+	    2. LOG INFO       — structured error log without payload (production-safe)
+	    3. LOG DEBUG      — encrypted payload log (for debugging in lower envs)
+	    4. DLQ (optional) — uncomment flow-ref to enable DLQ on error
+	-->
+	<error-handler name="global-error-handler">
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue">
+			<module-error-handler-plugin:process-error
+				doc:name="Process Error"
+				error="#[vars.errorDetails default error]"
+				useGeneratedError="false">
+				<module-error-handler-plugin:custom-errors><![CDATA[#[${file::errors/customErrors.dwl}]]]></module-error-handler-plugin:custom-errors>
+			</module-error-handler-plugin:process-error>
+			<set-variable variableName="httpStatus"
+				value="#[attributes.httpStatus]"
+				doc:name="Set HTTP Status Code" />
+
+			<!-- INFO: structured error context (always emitted, no payload) -->
+			<module-logger:build-error-log-without-payload
+				doc:name="LOG ERROR"
+				config-ref="custom-logger-connector_config"
+				message='#[(attributes.httpStatus default "500") ++ " - " ++ (payload.error.reason default "Internal Server Error")]'
+				logLevel="INFO"
+				tracepoint="EXCEPTION"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				errorCode="#[payload.error.code default attributes.httpStatus default 500]"
+				errorType="#[error.errorType.namespace ++ ':' ++ error.errorType.identifier]"
+				errorDescription="#[payload.error.message default error.description]"
+				cause="#[error.cause.message default '']" />
+
+			<!-- DEBUG: encrypted payload details for lower-environment troubleshooting -->
+			<module-logger:build-error-log-with-encrypted-payload
+				doc:name="LOG ERROR DEBUG"
+				config-ref="custom-logger-connector_config"
+				message="Error payload details"
+				logLevel="DEBUG"
+				tracepoint="EXCEPTION"
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]"
+				errorCode="#[payload.error.code default attributes.httpStatus default 500]"
+				errorType="#[error.errorType.namespace ++ ':' ++ error.errorType.identifier]"
+				errorDescription="#[payload.error.message default error.description]"
+				cause="#[error.cause.message default '']">
+				<module-logger:body><![CDATA[#[output application/json --- { code: attributes.httpStatus, message: payload.error.message }]]]></module-logger:body>
+			</module-logger:build-error-log-with-encrypted-payload>
+
+			<!--
+			    Uncomment to send failure notifications (e.g. Teams/email alerts).
+			    Requires notification-connector_config and send-notification-sub-flow.
+			-->
+			<!-- <flow-ref doc:name="Send Notification" name="send-notification-sub-flow" /> -->
+
+			<!--
+			    Uncomment to publish failed events to the DLQ for manual reprocessing.
+			    This is recommended for Salesforce event flows in Pattern A and B.
+			-->
+			<!-- <flow-ref doc:name="Send to DLQ" name="mq-dlq-publish-sub-flow" /> -->
+
+			<foreach doc:name="For Each" collection="#[namesOf(vars)]">
+				<remove-variable doc:name="Removing All Variables" variableName="#[payload]"/>
+			</foreach>
+		</on-error-continue>
+	</error-handler>
+
+	<!--
+	    check-for-raise-error-sub-flow
+	    Used after any downstream sub-flow that sets vars.success = false on failure.
+	    Raises APP:CONNECTIVITY_FAILED so the global error handler catches it uniformly.
+	-->
+	<sub-flow name="check-for-raise-error-sub-flow">
+		<choice doc:name="CHECK for Success == false">
+			<when expression="#[!vars.success default false]">
+				<raise-error
+					doc:name="RAISE APP:CONNECTIVITY_FAILED ERROR"
+					type="APP:CONNECTIVITY_FAILED"
+					description='#[vars.errorDetails.description default error.detailedDescription default ""]' />
+			</when>
+		</choice>
+	</sub-flow>
+
+</mule>

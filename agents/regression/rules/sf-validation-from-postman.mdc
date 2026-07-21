@@ -1,0 +1,341 @@
+---
+description: SF validation flow triggered after a successful Postman/Newman run. Parses the Newman JSON output to extract samples, analyses the Mule codebase to generate a ruleset, then executes the Salesforce regression harness.
+globs:
+alwaysApply: false
+---
+
+
+# SF Validation from Postman Output
+
+This procedure is invoked by `run-regression-implementation.mdc` (Step 6) when
+the user confirms they want Salesforce validation after a Newman run. It is
+**not** triggered by a standalone phrase — it always receives two pre-resolved
+variables from the caller:
+
+- `newman_json_path` — full workspace-relative path to the Newman JSON report
+  (e.g. `project/output_regression/sfl-crm-persona-sys-api-DEV-20260520-201820.json`)
+- `api_name` — the API identifier derived from the collection filename
+  (e.g. `sfl-crm-persona-sys-api`)
+
+Read this file in full before executing any phase.
+
+---
+
+## Phase A — Parse Newman JSON and Extract Samples
+
+Read the file at `newman_json_path`. The file is a Newman run report with a
+top-level `run` key.
+
+For each entry in `run.executions`:
+
+1. **Filter** — keep only executions where:
+   - `response.code` is in the range 200–299 (successful HTTP responses)
+   - `request.body` exists and `request.body.raw` is a non-empty string
+     (skip GET requests and requests with no body)
+
+2. **Extract request payload**:
+   ```javascript
+   const reqPayload = JSON.parse(execution.request.body.raw);
+   ```
+
+3. **Extract response body**:
+   ```javascript
+   const respRaw = Buffer.from(execution.response.stream.data).toString('utf8');
+   const respBody = JSON.parse(respRaw);  // may fail — treat as empty object if not valid JSON
+   ```
+
+4. **Extract Salesforce IDs from response body** — scan every key at the top
+   level of `respBody` and any nested objects one level deep. A value is
+   treated as a Salesforce ID candidate if it matches:
+   - An 18-character alphanumeric string (standard SF ID format), **or**
+   - A key whose name ends with `Id` or `id` (case-insensitive) and whose
+     value is a non-empty string
+
+   Collect these as `{ keyName: value }` pairs to merge into the sample.
+
+5. **Compose the sample object**:
+   ```json
+   {
+     "_instructions": "Generated from Newman run <newman_json_path>. Request name: '<item.name>'. SF entity IDs were extracted from the API response — verify they are valid before running the SF regression. If any ID shows as FILL_IN, locate it manually from the API response and paste it here.",
+     "<sfIdKey>": "<extracted-value-or-FILL_IN>",
+     ... spread all keys from reqPayload ...
+   }
+   ```
+   - SF ID keys from the response take precedence over any same-named keys in
+     the request payload.
+   - If no SF IDs were found in the response, emit a comment in
+     `_instructions` telling the user to fill them in manually.
+
+6. **Slug the filename** — take `execution.item.name`, lowercase it, replace
+   spaces and special characters with hyphens, trim to 60 chars. This becomes
+   the sample filename: `{slug}.json`.
+
+7. **Skip and report** — for executions skipped due to non-2xx status or
+   missing body, print a one-line note in chat:
+   `⚠ Skipped "{item.name}" (HTTP {code}) — no sample generated.`
+
+At the end of Phase A, print a summary:
+```
+Extracted N sample(s) from Newman run:
+  • {slug-1}.json  (from "{item.name}", HTTP 201)
+  • {slug-2}.json  (from "{item.name}", HTTP 200)
+  ⚠ Skipped: "{item.name}" (HTTP 400)
+```
+
+---
+
+## Phase B — Resolve Codebase
+
+Determine the Mule project folder for `api_name`:
+
+1. **Auto-detect**: Check whether
+   `project/output_develop/{api_name}/src/main/` exists in the workspace.
+   - If yes, set `codebase_root = project/output_develop/{api_name}` and tell
+     the user: `"Found Mule project at {codebase_root} — using it for codebase
+     analysis."`
+
+2. **Ask if not found**: If the auto-detect path does not exist, ask:
+   > "Please provide the path to the Mule project for `{api_name}`
+   > (the folder that contains `src/main/mule/` and `src/main/resources/`)."
+   Set `codebase_root` to whatever the user provides. Accept both absolute
+   paths and workspace-relative paths.
+
+---
+
+## Phase C — Analyse Codebase
+
+Read the following files from `codebase_root` to build an understanding of
+what Salesforce objects the Mule app writes and how it matches them:
+
+### C1 — Constants (`config.properties`)
+
+Read `{codebase_root}/src/main/resources/properties/config.properties`.
+
+Collect every property that looks like a Salesforce literal:
+- RecordType names (keys containing `RecordType`, `recordType`)
+- Source system identifiers (keys containing `SourceSystem`, `source.system`)
+- Status values, stage names, hard-coded labels
+
+Build `consts_map = { propertyKey: propertyValue }`. These populate
+`ruleset.consts` in Phase D.
+
+If the file does not exist, skip and note in chat; `consts_map` will be empty
+and the user should fill in `ruleset.consts` manually.
+
+### C2 — Upsert transforms (`v-*.dwl`)
+
+Glob `{codebase_root}/src/main/resources/dwls/v-*.dwl` and read each file.
+
+For each DWL file:
+- Infer the **Salesforce object** from the filename or the first line of the
+  file (e.g. `v-lead-upsert-request.dwl` → `Lead`; look for comments like
+  `// SF Object: Lead`).
+- Extract **field mappings**: look for patterns like `FieldName: payload.X`,
+  `FieldName: vars.X`, or `FieldName: "literal"`. Map each SF field to its
+  source expression.
+- Note whether the file is a **create**, **upsert**, or **update** operation
+  (look for `sObject`, `upsert`, `create`, `update` keywords).
+
+Build `sobject_map = { SObjectName: { dwl_file, fields: [{sfField, source}], mode } }`.
+
+### C3 — Query SOQL (`p-set-*-queries.dwl`)
+
+Glob `{codebase_root}/src/main/resources/dwls/p-set-*-queries.dwl` and read
+each file.
+
+For each file:
+- Extract every SOQL SELECT statement, including its WHERE clause.
+- Associate each query with the SObject it targets (FROM clause).
+- These WHERE clauses are used **verbatim** (with template placeholders
+  substituted) in `lookup.soql` in Phase D — this ensures the regression
+  check replays the exact match logic the Mule app uses.
+
+Update `sobject_map[SObjectName].match_soql` with the found WHERE clause.
+
+### C4 — Flow XML (`src/main/mule/*.xml`)
+
+Glob `{codebase_root}/src/main/mule/*.xml` and read each file.
+
+For each XML file:
+- Look for Salesforce connector operations: `<sfdc:create>`, `<sfdc:upsert>`,
+  `<sfdc:update>`, `<sfdc:query>`.
+- Extract the `type` attribute (SF object name) and the file/flow name.
+- Use this to confirm or supplement `sobject_map` and to fill `cites:` blocks.
+
+At the end of Phase C, print a compact summary:
+```
+Codebase analysis complete for {api_name}:
+  • Config constants found: N
+  • SF objects identified: Lead, Task, Account (from v-*.dwl)
+  • SOQL match clauses found: Lead (from p-set-lead-queries.dwl), ...
+  • Flow XML operations: {flow-file}.xml → sfdc:create Lead, sfdc:query Task
+```
+
+---
+
+## Phase D — Write Artifacts
+
+### D1 — Write sample files
+
+Create directory `regression-tooling/{api_name}/samples/` if it does not exist.
+
+For each sample composed in Phase A, write
+`regression-tooling/{api_name}/samples/{slug}.json` with the sample object.
+
+Do not overwrite existing files without asking:
+> "A sample file `{slug}.json` already exists. Overwrite? (yes / no / rename)"
+
+### D2 — Generate and write `ruleset.yaml`
+
+Read `agents/regression/templates/ruleset.yaml` as the seed template.
+
+Produce a new `ruleset.yaml` by substituting:
+
+**Top-level fields:**
+```yaml
+ruleset:
+  name: {api_name}
+  api_version: v62.0
+  default_org_alias: <<ask-user-if-not-inferrable>>
+```
+
+Ask for `default_org_alias` if it cannot be inferred from an existing
+`regression-tooling/` folder or from a `.cursor/` config. Common values:
+`insulet-devint2`, `insulet-devint`.
+
+**`consts:` block:**
+Populate from `consts_map` (Phase C1). Use the actual property values.
+Comment out any entries where the value is unknown.
+
+**`rules:` block:**
+Generate one rule per SObject in `sobject_map` using the appropriate pattern:
+
+| Situation | Pattern to use |
+|---|---|
+| SObject is always created (mode: create/upsert), match key is stable | Pattern 1 — simple positive lookup |
+| Some fields only written when payload key is present (conditional DWL branch) | Pattern 2 — conditional fields with `when:` |
+| SObject is a read-only lookup that may not exist (mode: query only, no create) | Pattern 3 — `allow_skip_when: always` |
+| Match strategy depends on which payload keys are populated (multiple WHERE variants in SOQL) | Pattern 4 — multi-lookup fallback |
+| Any field is a Salesforce picklist (detected by field name ending in `__c` or known picklist names like `Status`, `Gender`, `Type`) | Add `case_insensitive: true` to that field (Pattern 5 style) |
+| Always add one rule at the end | Pattern 6 — `integration-error-absence` negative assertion |
+
+For each rule:
+
+- `id:` — slugify the SObject name (e.g. `Lead` → `lead`, `Task` → `task`,
+  `Integration_Error__c` → `integration-error-absence`)
+- `object:` — exact SObject API name from `sobject_map`
+- `description:` — one sentence explaining what the Mule app does with this
+  object, derived from Phase C analysis
+- `cites:` — list the actual DWL/XML file paths found in Phase C for this
+  object (e.g. `project/output_develop/{api_name}/src/main/resources/dwls/v-lead-upsert-request.dwl`)
+- `lookup.soql` — use the WHERE clause from `match_soql` (Phase C3) with
+  payload fields replaced by `{{ payload.X }}` templates. For objects where
+  no query SOQL was found, construct a best-effort WHERE clause from the
+  field mappings (e.g. `WHERE External_Id__c = '{{ payload.leadId }}'`)
+- `expect.fields` — map each `{sfField}` from Phase C2 to its payload
+  source as a template: `SFField: "{{ payload.payloadKey }}"`. For literal
+  values (e.g. `"Contact Local TM"`), use `consts.KeyName` if the value
+  appears in `consts_map`, otherwise inline the literal.
+
+Add `depends_on: []` for Layer 0 (root) objects; add `depends_on: [<parent-id>]`
+for objects whose match SOQL references a captured parent ID.
+
+Set `capture_as` for the primary entity (the first created/upserted SObject
+with a stable external ID). Do not set `capture_as` for negative-assertion
+rules or purely read-only lookups.
+
+**Important**: Label the generated ruleset clearly as a draft:
+
+```yaml
+# ============================================================================
+# GENERATED DRAFT — review before running the SF regression
+#
+# Generated by: agents/regression/rules/sf-validation-from-postman.mdc
+# Source Newman run: {newman_json_path}
+# Codebase analysed: {codebase_root}
+# Generated at: {ISO timestamp}
+#
+# Steps to validate this ruleset:
+#   1. Check every `lookup.soql` WHERE clause matches the Mule app's
+#      actual query logic in p-set-*-queries.dwl.
+#   2. Verify `expect.fields` values match what the DWL writes, not just
+#      what the payload contains.
+#   3. Fill in any <<UNKNOWN>> placeholders.
+#   4. Run: "regression test {api_name} against <org>"
+# ============================================================================
+```
+
+Write to `regression-tooling/{api_name}/ruleset.yaml`.
+
+If the file already exists, ask:
+> "A `ruleset.yaml` already exists for `{api_name}`. Overwrite with the
+> generated draft? (yes / no)"
+
+### D3 — Print generation summary
+
+```
+Generated for {api_name}:
+
+  regression-tooling/{api_name}/
+  ├── ruleset.yaml       ← DRAFT — N rules across M SF objects
+  └── samples/
+      ├── {slug-1}.json
+      └── {slug-2}.json
+
+Review the ruleset before running, especially:
+  • WHERE clauses in lookup.soql
+  • Field values in expect.fields
+  • Any <<UNKNOWN>> placeholders
+```
+
+---
+
+## Phase E — Trigger SF Regression
+
+Ask the user:
+> "Which samples would you like to run the SF regression on?
+> Reply **all** to run all N samples, or list the filenames
+> (e.g. `{slug-1}.json, {slug-2}.json`)."
+
+For each selected sample:
+
+1. Read `agents/regression/templates/regression-validate.mdc` in full.
+2. Execute the procedure defined there, passing:
+   - `ruleset_path = regression-tooling/{api_name}/ruleset.yaml`
+   - `payload = regression-tooling/{api_name}/samples/{selected}.json`
+   - `org_alias` = `ruleset.default_org_alias` (from the just-written
+     ruleset), or whatever the user provided if asked during Phase D
+   - `report_template_path = agents/regression/templates/report-template.html`
+
+Reports are persisted to:
+```
+project/output_regression/{api_name}-sf-validation/
+  {run_id}-{slug}.md
+  {run_id}-{slug}.html
+```
+
+After all selected samples have been run, print a combined one-liner:
+```
+SF validation complete. Samples run: N. Reports in project/output_regression/{api_name}-sf-validation/.
+```
+
+---
+
+## Constraints and conventions
+
+- **Never auto-fix the ruleset.** If a SOQL fails or a field assertion
+  mismatches, surface it as a finding in the report — do not edit
+  `ruleset.yaml` on your own.
+- **Draft label is mandatory.** Every generated `ruleset.yaml` must carry
+  the `GENERATED DRAFT` header comment defined in Phase D2.
+- **Cite real paths.** Every `cites:` block must reference an actual file
+  that was read during Phase C. Do not invent paths.
+- **Sanitise PII in samples.** If the request body contains obvious PII
+  (email, phone, name fields), replace the values with realistic-looking
+  placeholders (e.g. `"test.user@example.com"`, `"555-0100"`) before
+  writing the sample file.
+- **One rule per SObject.** Bundle all field assertions for a given SObject
+  into a single rule rather than spreading them across multiple rules.
+- **`integration-error-absence` is always last.** Add it regardless of
+  whether it was detected in the codebase — it is a universal post-condition
+  for every Mule API.

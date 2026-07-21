@@ -1,0 +1,314 @@
+---
+description: Full implementation spec for the regression test agent — credential gate, Newman install, execution, HTML table generation, and chat summary.
+globs:
+alwaysApply: false
+---
+
+
+# Implementation: Regression Test Runner
+
+## Variables
+
+```
+COLLECTION   = agents/postman/examples/{api-name}.postman_collection.json
+ENV          = local | DEV                          (from user)
+TIMESTAMP    = $(date +"%Y%m%d-%H%M%S")
+OUTDIR       = project/output_regression
+JSON_REPORT  = ${OUTDIR}/{api-name}-${ENV}-${TIMESTAMP}.json
+HTML_REPORT  = ${OUTDIR}/{api-name}-${ENV}-${TIMESTAMP}.html
+NEWMAN       = /tmp/newman-env/node_modules/.bin/newman
+HTML_SCRIPT  = /tmp/gen-html-report.js
+```
+
+---
+
+## Step 1 — Credential Gate
+
+Read the collection JSON with Node.js and check that `anypoint_client_id` and `anypoint_client_secret` are set:
+
+```bash
+node -e "
+const col = JSON.parse(require('fs').readFileSync('${COLLECTION}'));
+const vars = Object.fromEntries((col.variable || []).map(v => [v.key, v.value]));
+const bad = v => !v || v === '' || v.startsWith('TODO') || v === 'YOUR_CLIENT_ID_HERE';
+if (bad(vars.anypoint_client_id) || bad(vars.anypoint_client_secret)) {
+  console.error('CREDENTIAL_GATE_FAIL');
+  process.exit(1);
+}
+console.log('CREDENTIAL_GATE_PASS');
+"
+```
+
+If exit code is non-zero, **STOP** and tell the user:
+
+```
+STOP: credentials are not set in the collection.
+Open agents/postman/examples/{api-name}.postman_collection.json,
+find the "variable" array and set:
+  - anypoint_client_id
+  - anypoint_client_secret
+Then retry.
+```
+
+---
+
+## Step 2 — Install Newman (if not present)
+
+```bash
+if [ ! -f /tmp/newman-env/node_modules/.bin/newman ]; then
+  npm install --prefix /tmp/newman-env newman newman-reporter-htmlextra 2>&1
+fi
+```
+
+Verify:
+```bash
+/tmp/newman-env/node_modules/.bin/newman --version
+```
+
+If the binary is still missing, stop and ask the user to run `npm install -g newman` manually.
+
+---
+
+## Step 3 — Run Newman (JSON reporter only)
+
+```bash
+mkdir -p project/output_regression
+
+/tmp/newman-env/node_modules/.bin/newman run "${COLLECTION}" \
+  --folder "${ENV}" \
+  -r json \
+  --reporter-json-export "${JSON_REPORT}"
+```
+
+Newman exits 0 even when requests return error HTTP codes; it only exits non-zero when there are assertion failures or a fatal run error. Capture and display stdout/stderr inline in chat.
+
+---
+
+## Step 4 — Generate Custom HTML Report
+
+Write the following Node.js script to `/tmp/gen-html-report.js`, run it, then delete the file.
+
+```javascript
+#!/usr/bin/env node
+// Usage: node /tmp/gen-html-report.js <input.json> <output.html>
+const fs = require('fs');
+const path = require('path');
+
+const [,, jsonPath, htmlPath] = process.argv;
+const report = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+
+const runs = report.run.executions;
+const stats = report.run.stats;
+const timings = report.run.timings;
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatBody(stream) {
+  if (!stream || !stream.data) return '';
+  try {
+    const raw = Buffer.from(stream.data).toString('utf8');
+    try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
+  } catch { return ''; }
+}
+
+function getHeader(headers, key) {
+  if (!headers) return '';
+  const h = headers.find(h => h.key.toLowerCase() === key.toLowerCase());
+  return h ? h.value : '';
+}
+
+function formatUrl(urlObj) {
+  if (!urlObj) return '';
+  const host = Array.isArray(urlObj.host) ? urlObj.host.join('.') : urlObj.host;
+  const pathStr = Array.isArray(urlObj.path) ? urlObj.path.join('/') : urlObj.path;
+  const query = (urlObj.query || []).filter(q => q.key).map(q => q.key + '=' + q.value).join('&');
+  return (urlObj.protocol || 'https') + '://' + host + '/' + pathStr + (query ? '?' + query : '');
+}
+
+const rows = runs.map((e, idx) => {
+  const name = e.item.name;
+  const code = e.response ? e.response.code : 'N/A';
+  const status = e.response ? e.response.status : 'NO_RESPONSE';
+  const duration = e.response ? e.response.responseTime + 'ms' : 'N/A';
+  const body = e.response ? formatBody(e.response.stream) : '';
+  const correlationId = e.response ? getHeader(e.response.header, 'x-correlation-id') : '';
+  const contentType   = e.response ? getHeader(e.response.header, 'content-type') : '';
+  const reqUrl    = e.request ? formatUrl(e.request.url) : '';
+  const reqMethod = e.request ? e.request.method : '';
+  const reqBody   = e.request && e.request.body && e.request.body.raw
+    ? (() => { try { return JSON.stringify(JSON.parse(e.request.body.raw), null, 2); } catch { return e.request.body.raw; } })()
+    : '';
+  const failed = !e.response || e.response.code < 200 || e.response.code >= 300;
+  const passLabel = failed ? 'FAIL' : 'PASS';
+  const rowClass = failed ? 'fail' : 'pass';
+  return `
+    <tr class="${rowClass}">
+      <td>${idx + 1}</td>
+      <td>
+        <details>
+          <summary>${escapeHtml(name)}</summary>
+          <div class="req-detail">
+            <div class="req-url">${escapeHtml(reqMethod)} ${escapeHtml(reqUrl)}</div>
+            ${reqBody ? `<div class="req-section">Request Body</div><pre>${escapeHtml(reqBody)}</pre>` : ''}
+          </div>
+        </details>
+      </td>
+      <td>${escapeHtml(String(code))}</td>
+      <td>${escapeHtml(status)}</td>
+      <td>${escapeHtml(duration)}</td>
+      <td><span class="badge ${rowClass.toLowerCase()}">${passLabel}</span></td>
+      <td>
+        <div><strong>x-correlation-id:</strong> ${escapeHtml(correlationId)}</div>
+        <div><strong>Content-Type:</strong> ${escapeHtml(contentType)}</div>
+      </td>
+      <td><pre>${escapeHtml(body)}</pre></td>
+    </tr>`;
+}).join('\n');
+
+const totalRequests = stats.requests ? stats.requests.total : runs.length;
+const failedRequests = runs.filter(e => !e.response || e.response.code < 200 || e.response.code >= 300).length;
+const passedRequests = totalRequests - failedRequests;
+const totalDuration = timings ? (timings.completed - timings.started) + 'ms' : 'N/A';
+const runTimestamp = new Date().toISOString();
+const collectionName = report.collection ? (report.collection.info ? report.collection.info.name : path.basename(jsonPath)) : path.basename(jsonPath);
+
+const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>${escapeHtml(collectionName)} — Regression Report</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; padding: 24px; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; color: #1a1a2e; }
+  .meta { font-size: 0.82rem; color: #666; margin-bottom: 20px; }
+  .stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: #fff; border-radius: 8px; padding: 14px 20px; min-width: 120px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); text-align: center; }
+  .stat-card .value { font-size: 1.8rem; font-weight: 700; }
+  .stat-card .label { font-size: 0.75rem; color: #888; margin-top: 2px; }
+  .stat-card.green .value { color: #22863a; }
+  .stat-card.red .value { color: #cb2431; }
+  .stat-card.blue .value { color: #0366d6; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+  thead tr { background: #1a1a2e; color: #fff; }
+  thead th { padding: 12px 14px; text-align: left; font-size: 0.82rem; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+  tbody tr { border-bottom: 1px solid #eee; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr.pass { background: #f0fff4; }
+  tbody tr.fail { background: #fff5f5; }
+  tbody tr:hover { filter: brightness(0.97); }
+  td { padding: 10px 14px; font-size: 0.82rem; vertical-align: top; }
+  td pre { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.75rem; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; background: #f8f8f8; padding: 8px; border-radius: 4px; border: 1px solid #e0e0e0; }
+  .badge { font-weight: 700; font-size: 0.75rem; padding: 3px 8px; border-radius: 4px; display: inline-block; }
+  .badge.pass { background: #dcffe4; color: #22863a; }
+  .badge.fail { background: #ffdce0; color: #cb2431; }
+  td:nth-child(1) { width: 36px; color: #888; }
+  td:nth-child(3), td:nth-child(5) { white-space: nowrap; }
+  footer { margin-top: 20px; font-size: 0.78rem; color: #999; text-align: right; }
+  details summary { cursor: pointer; font-weight: 600; list-style: disclosure-closed; }
+  details[open] summary { list-style: disclosure-open; }
+  details summary:hover { text-decoration: underline; }
+  .req-detail { margin-top: 8px; font-size: 0.78rem; color: #444; }
+  .req-url { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.75rem; background: #eef2ff; padding: 4px 8px; border-radius: 4px; margin-bottom: 6px; word-break: break-all; }
+  .req-section { font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 6px 0 2px; }
+</style>
+</head>
+<body>
+<h1>${escapeHtml(collectionName)} — Regression Report</h1>
+<p class="meta">Generated: ${runTimestamp} &nbsp;|&nbsp; Total duration: ${totalDuration}</p>
+<div class="stats">
+  <div class="stat-card blue"><div class="value">${totalRequests}</div><div class="label">Total Requests</div></div>
+  <div class="stat-card green"><div class="value">${passedRequests}</div><div class="label">Passed</div></div>
+  <div class="stat-card red"><div class="value">${failedRequests}</div><div class="label">Failed</div></div>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Request</th>
+      <th>HTTP Code</th>
+      <th>Status</th>
+      <th>Duration</th>
+      <th>Result</th>
+      <th>Response Headers</th>
+      <th>Response Payload</th>
+    </tr>
+  </thead>
+  <tbody>
+    ${rows}
+  </tbody>
+</table>
+<footer>Report generated from ${escapeHtml(path.basename(jsonPath))}</footer>
+</body>
+</html>`;
+
+fs.writeFileSync(htmlPath, html, 'utf8');
+console.log('HTML report written to', htmlPath);
+```
+
+Execute the script and delete it:
+
+```bash
+node /tmp/gen-html-report.js "${JSON_REPORT}" "${HTML_REPORT}"
+rm -f /tmp/gen-html-report.js
+```
+
+---
+
+## Step 5 — Chat Summary Table
+
+Read `${JSON_REPORT}` and emit a markdown table. Truncate payload to 200 characters:
+
+```
+| # | Request | HTTP Code | Status | Duration | Result | Response Headers | Response Payload (truncated) |
+|---|---------|-----------|--------|----------|--------|------------------|------------------------------|
+| 1 | GET /api/ping — Happy Path | 200 | OK | 345ms | ✅ PASS | x-correlation-id: b956a5eb… / Content-Type: application/json | `{"status":"alive"}` |
+| 2 | POST /api/patients/leads — Happy Path | 400 | Bad Request | 512ms | ❌ FAIL | x-correlation-id: a1b2c3… / Content-Type: application/json | `{"error":{"code":400,"reason":"Bad Request",…` |
+```
+
+Rules:
+- Payload: first 200 chars of the raw response body, append `…` if longer.
+- Result column: `✅ PASS` when HTTP code is 2xx (200–299). `❌ FAIL` for any other HTTP code or no response.
+- Response Headers column: show `x-correlation-id` and `Content-Type` extracted from `e.response.header`, separated by ` / ` in the markdown cell.
+- For `❌ FAIL` rows, also print the full response body as a fenced JSON block below the table for immediate debugging.
+
+Footer line:
+```
+Reports saved:
+- HTML → project/output_regression/{api-name}-{ENV}-{timestamp}.html
+- JSON → project/output_regression/{api-name}-{ENV}-{timestamp}.json
+```
+
+---
+
+## Security Rules
+
+- `anypoint_client_id` and `anypoint_client_secret` are **never** passed as `--env-var` CLI flags — they live only inside the collection's `variable` array (filled by the user).
+- The `project/output_regression/` directory is git-ignored via `project/output_regression/.gitignore`.
+- Never write credentials to any file or print them in chat.
+
+---
+
+## Step 6 — Salesforce Validation Prompt
+
+After printing the chat summary table, **always** ask:
+
+> "Newman run complete. Would you like to validate that the Salesforce records
+> were written correctly as well?
+> Reply **yes** to start the SF validation flow, or **no** to stop here."
+
+If the user replies **yes**:
+
+1. Read `agents/regression/rules/sf-validation-from-postman.mdc` in full before taking any other action.
+2. Execute the procedure defined in that file, passing the following resolved variables:
+   - `newman_json_path` = the value of `${JSON_REPORT}` (the full path just written, e.g. `project/output_regression/sfl-crm-persona-sys-api-DEV-20260520-201820.json`)
+   - `api_name` = `{api-name}` (the collection basename without `.postman_collection.json`, e.g. `sfl-crm-persona-sys-api`)
+
+If the user replies **no**, stop here.

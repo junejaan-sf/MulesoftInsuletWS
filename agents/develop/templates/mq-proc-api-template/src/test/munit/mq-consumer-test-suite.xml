@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+	xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+	<!--
+	    mq-consumer-test-suite.xml
+	    MUnit test stubs for mq-consumer-sub-flow.
+
+	    Test strategy:
+	      - Mock anypoint-mq:ack to prevent real ACK calls
+	      - Mock http:request (downstream sys API) to simulate success and failure
+	      - Mock anypoint-mq:publish to verify DLQ fallback (negative path)
+	      - Verify vars.success for both paths
+
+	    REPLACE {downstream-sys-api} and adjust mock payloads for real implementation.
+	-->
+
+	<munit:config name="mq-consumer-test-suite" doc:name="MUnit configuration">
+		<munit:parameterizations>
+			<munit:parameterization name="local">
+				<munit:parameters>
+					<munit:parameter propertyName="mule.env" value="local" />
+				</munit:parameters>
+			</munit:parameterization>
+		</munit:parameterizations>
+	</munit:config>
+
+	<!-- ==========================================================
+	     Positive Test — Message processed successfully, ACK issued
+	     ========================================================== -->
+	<munit:test
+		name="mq-consumer-sub-flow-positive-test"
+		description="POSITIVE: MQ message consumed → downstream {downstream-sys-api} returns 200 → ACK issued"
+		doc:name="POSITIVE: MQ consumer processes message and ACKs">
+
+		<munit:enable-flow-sources>
+			<munit:enable-flow-source value="mq-consumer-sub-flow" />
+		</munit:enable-flow-sources>
+
+		<munit:behavior>
+			<!-- Mock: anypoint-mq:ack — suppress real ACK -->
+			<munit-tools:mock-when processor="anypoint-mq:ack">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="anypoint-mq_config" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:variables>
+						<munit-tools:variable key="mqAckSent" value="#[true]" />
+					</munit-tools:variables>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock: http:request → downstream sys API returns 200 -->
+			<munit-tools:mock-when processor="http:request">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="{downstream-sys-api}_httpRequest_config" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload mediaType="application/json" value='#[output application/json ---
+{
+    "status": "success",
+    "id": "test-record-id-001"
+}]' />
+					<munit-tools:attributes value='#[{
+    "statusCode": 200,
+    "reasonPhrase": "OK",
+    "headers": {"content-type": "application/json"}
+}]' />
+					<munit-tools:variables>
+						<munit-tools:variable key="success" value="#[true]" />
+					</munit-tools:variables>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload doc:name="Set MQ Message Payload"
+				value='#[output application/json ---
+{
+    "transactionId": "txn-001",
+    "eventType": "TEST_EVENT",
+    "data": {
+        "fieldA": "value1",
+        "fieldB": "value2"
+    }
+}]'
+				mediaType="application/json" />
+
+			<set-variable variableName="mqAckToken"
+				value="mock-ack-token-001"
+				doc:name="Set Mock ACK Token" />
+
+			<flow-ref doc:name="Execute mq-consumer-sub-flow" name="mq-consumer-sub-flow" />
+		</munit:execution>
+
+		<munit:validation>
+			<munit-tools:assert-that
+				doc:name="Assert vars.success is true"
+				expression="#[vars.success]"
+				is="#[MunitTools::equalTo(true)]" />
+
+			<munit-tools:verify-call
+				doc:name="Verify downstream http:request was called once"
+				processor="http:request"
+				times="1" />
+
+			<munit-tools:verify-call
+				doc:name="Verify anypoint-mq:ack was called once"
+				processor="anypoint-mq:ack"
+				times="1" />
+		</munit:validation>
+	</munit:test>
+
+	<!-- ==========================================================
+	     Negative Test — Downstream failure → DLQ publish, ACK issued
+	     ========================================================== -->
+	<munit:test
+		name="mq-consumer-sub-flow-negative-test"
+		description="NEGATIVE: Downstream {downstream-sys-api} returns 500 → error handler → DLQ publish"
+		doc:name="NEGATIVE: Downstream failure triggers DLQ path"
+		expectedErrorType="APP:CONNECTIVITY_FAILED">
+
+		<munit:enable-flow-sources>
+			<munit:enable-flow-source value="mq-consumer-sub-flow" />
+			<munit:enable-flow-source value="global-error-handler" />
+		</munit:enable-flow-sources>
+
+		<munit:behavior>
+			<!-- Mock: anypoint-mq:ack — suppress real ACK -->
+			<munit-tools:mock-when processor="anypoint-mq:ack">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="anypoint-mq_config" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:variables>
+						<munit-tools:variable key="mqAckSent" value="#[true]" />
+					</munit-tools:variables>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock: http:request → downstream returns 503 connectivity error -->
+			<munit-tools:mock-when processor="http:request">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="{downstream-sys-api}_httpRequest_config" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="HTTP:SERVICE_UNAVAILABLE" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock: anypoint-mq:publish → DLQ (suppress real publish) -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="anypoint-mq_config" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:variables>
+						<munit-tools:variable key="dlqPublished" value="#[true]" />
+					</munit-tools:variables>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock: sfl-crm-persona HTTP call (integration error logging) -->
+			<munit-tools:mock-when processor="http:request">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="sfl-crm-persona-sys-api_httpRequest_config" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload mediaType="application/json" value='#[output application/json ---
+{
+    "id": "sf-integration-error-001",
+    "status": "created"
+}]' />
+					<munit-tools:attributes value='#[{
+    "statusCode": 201,
+    "reasonPhrase": "Created"
+}]' />
+					<munit-tools:variables>
+						<munit-tools:variable key="success" value="#[true]" />
+					</munit-tools:variables>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload doc:name="Set MQ Message Payload"
+				value='#[output application/json ---
+{
+    "transactionId": "txn-002",
+    "eventType": "TEST_EVENT",
+    "data": {
+        "fieldA": "bad-value"
+    }
+}]'
+				mediaType="application/json" />
+
+			<set-variable variableName="mqAckToken"
+				value="mock-ack-token-002"
+				doc:name="Set Mock ACK Token" />
+
+			<set-variable variableName="deliveryCount"
+				value="#[10]"
+				doc:name="Set deliveryCount above threshold to trigger DLQ route" />
+
+			<flow-ref doc:name="Execute mq-consumer-sub-flow" name="mq-consumer-sub-flow" />
+		</munit:execution>
+
+		<munit:validation>
+			<munit-tools:assert-that
+				doc:name="Assert vars.success is false"
+				expression="#[vars.success]"
+				is="#[MunitTools::equalTo(false)]" />
+
+			<munit-tools:verify-call
+				doc:name="Verify downstream http:request was called"
+				processor="http:request"
+				times="1">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="config-ref" whereValue="{downstream-sys-api}_httpRequest_config" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+		</munit:validation>
+	</munit:test>
+
+</mule>

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd">
+
+	<!--
+	     VALIDATE REFERENCE IDS SUB-FLOW
+	     (mirrors validate-reference-ids-sub-flow from sfl-crm-persona-sys-api)
+
+	     Checks that all referenceId values in compositeRequest[] are unique.
+	     Used as a guard before the composite call.
+	-->
+	<sub-flow name="validate-reference-ids-sub-flow" doc:id="11111111-dddd-4444-eeee-ff0000000001">
+
+		<module-logger:build-log-without-payload
+			doc:name="LOG validate-reference-ids-sub-flow start"
+			doc:id="22222222-dddd-4444-eeee-ff0000000002"
+			config-ref="custom-logger-connector_config"
+			message="validate-reference-ids-sub-flow start"
+			tracepoint="VALIDATION"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+
+		<ee:transform doc:name="DW Find Duplicate Reference Ids" doc:id="33333333-dddd-4444-eeee-ff0000000003">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-duplicate-reference-ids.dwl" variableName="duplicateReferenceIds" />
+			</ee:variables>
+		</ee:transform>
+
+		<validation:is-true
+			doc:name="Check No Duplicate ReferenceIds"
+			doc:id="44444444-dddd-4444-eeee-ff0000000004"
+			config-ref="validation_config"
+			expression="#[isEmpty(vars.duplicateReferenceIds)]"
+			message="#['Duplicate referenceId found in compositeRequest: ' ++ (vars.duplicateReferenceIds default [] joinBy ', ')]" />
+
+		<module-logger:build-log-without-payload
+			doc:name="LOG No duplicate referenceIds found"
+			doc:id="55555555-dddd-4444-eeee-ff0000000005"
+			config-ref="custom-logger-connector_config"
+			message="No duplicate referenceIds found in compositeRequest"
+			tracepoint="VALIDATION"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+
+	</sub-flow>
+
+	<!--
+	     SF COMPOSITE REQUEST SUB-FLOW — POST /composites
+
+	     Pattern  (mirrors sf-composite-sub-flow from sfl-crm-persona-sys-api):
+	       1. Validate no duplicate referenceIds (validate-reference-ids-sub-flow)
+	       2. Transform incoming payload → SF composite format  (p-composite-request.dwl)
+	       3. LOG BEFORE REQUEST — encrypted, BEFORE_SALESFORCE
+	       4. execute-sf-composite-flow
+	       5. LOG AFTER REQUEST  — encrypted, AFTER_SALESFORCE
+	       6. Map SF composite response → API response         (p-composite-response.dwl)
+	          Set httpStatus = 200
+
+	     Remove this file entirely if composite operations are not required.
+	-->
+	<sub-flow name="sf-composite-request-sub-flow" doc:id="66666666-dddd-4444-eeee-ff0000000006">
+
+		<flow-ref
+			doc:name="validate-reference-ids-sub-flow"
+			doc:id="77777777-dddd-4444-eeee-ff0000000007"
+			name="validate-reference-ids-sub-flow" />
+
+		<ee:transform doc:name="DW Transform Composite Request" doc:id="88888888-dddd-4444-eeee-ff0000000008">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-composite-request.dwl" />
+			</ee:message>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG BEFORE REQUEST"
+			doc:id="99999999-dddd-4444-eeee-ff0000000009"
+			config-ref="custom-logger-connector_config"
+			message="Executing SFDC composite request"
+			tracepoint="BEFORE_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- payload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<flow-ref
+			doc:name="execute-sf-composite-flow"
+			doc:id="aaaaaaaa-dddd-4444-eeee-ff0000000010"
+			name="execute-sf-composite-flow" />
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG AFTER REQUEST"
+			doc:id="bbbbbbbb-dddd-4444-eeee-ff0000000011"
+			config-ref="custom-logger-connector_config"
+			message="Response from SFDC composite request"
+			tracepoint="AFTER_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- payload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<ee:transform doc:name="DW Transform Composite Response" doc:id="cccccccc-dddd-4444-eeee-ff0000000012">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-composite-response.dwl" />
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable variableName="httpStatus"><![CDATA[200]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+	</sub-flow>
+
+</mule>

@@ -1,0 +1,58 @@
+---
+description: Triggers Live Test Data Resolver when the user asks to resolve, generate, seed, or fetch live Salesforce test data for Postman payloads for a MuleSoft API
+globs:
+alwaysApply: false
+---
+
+# Live Test Data Resolver Intent
+
+When the user's request is about **resolving**, **generating**, **seeding**, or **fetching** live Salesforce test data for Postman payloads — or when they run `/use-testdata` — use this intent to guide the process.
+
+## Procedure
+
+1. **Read `gen-testdata-implementation.mdc`** in full — it contains the complete algorithm for discovering SF operations from Mule code, classifying payload fields by role, running read-only SOQL queries via the SF MCP, and writing the seed-payload artifact.
+2. **Confirm the target API name.** If not provided in the request, ask the user:
+   - What is the MuleSoft API name? (e.g. `sfl-campaigns-sys-api`)
+   - Which environment's SF org should be used for live data? (default: devint/devint2)
+3. **Locate project source code** under `project/output_develop/{api-name}/src/`:
+   - `main/mule/*.xml` — Mule flow files
+   - `main/resources/properties/config.properties` and `config-dev.properties` — property files with SOQL queries and SObject aliases
+   - `main/resources/dwls/p-*-input.dwl` — request-mapping DataWeave files
+4. **Resolve the RAML spec** using the same five-tier lookup chain defined in `gen-postman-implementation-v2.mdc` §4.1 to enumerate non-health endpoints with request bodies.
+5. **Run the resolver algorithm** from `gen-testdata-implementation.mdc` §4 (Steps 1–8) for every non-health POST/PUT/PATCH endpoint:
+   - Discover SF operations from flow XML.
+   - Extract payload-field mappings and classify by role (lookup-key / foreign-key-id / plain-data).
+   - Order multi-object endpoints topologically.
+   - Select the SF login via EntityDefinition probe.
+   - Run read-only SOQLs via MCP `run_soql_query`.
+   - Assemble happy-path and negative-400 bodies.
+6. **Write** `project/input_postman/{api}-seed-payloads.json` following the contract in `gen-testdata-implementation.mdc` §3.
+7. **Emit a resolution summary** in chat listing every endpoint: RESOLVED (with the org alias) or SKIPPED (with the reason). See `gen-testdata-implementation.mdc` §4.8 for the exact format.
+
+## Scope
+
+- **Input:** Mule app source code under `project/output_develop/{api}/src/`, RAML spec.
+- **Output:** `project/input_postman/{api}-seed-payloads.json`.
+- **SF access:** Read-only via `user-salesforce-dx` MCP (`run_soql_query`, `list_all_orgs`, `get_username`). No writes to Salesforce.
+- **MUnit:** Not read by this agent; MUnit fixtures are untouched.
+
+## Hard Exclusions
+
+- Never create or modify Salesforce records (`sf data create`, `sf data import`, etc.).
+- Never write or update MUnit test fixtures.
+- Never embed secrets (client credentials, bearer tokens) in the seed-payload artifact.
+- Never guess or fabricate Salesforce record Ids — all Ids must come from a live MCP SOQL query.
+- Do not process GET or DELETE endpoints that have no request body.
+
+## Handoff — After Generation
+
+After writing the seed-payload artifact, suggest the next step:
+
+```
+Live Test Data Resolver complete.
+  Written: project/input_postman/{api}-seed-payloads.json
+  Resolved: <N> endpoints | Skipped: <M> endpoints
+
+To generate the Postman collection using this live data, run /use-postman in a new chat.
+The Postman agent will automatically pick up the seed-payloads file as its Tier 0 source.
+```

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:module-notification="http://www.mulesoft.org/schema/mule/module-notification"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/module-notification http://www.mulesoft.org/schema/mule/module-notification/current/mule-module-notification.xsd">
+
+	<!--
+		Async error flow: invoked asynchronously from the global error handler.
+		Wraps the POST /transactions-errors call in a try/on-error-continue so that
+		a failure in error-logging never propagates back to the caller.
+	-->
+	<sub-flow name="async-error-flow-sub-flow" doc:name="Async Error Flow - Insert Error Record">
+		<try doc:name="Try">
+			<flow-ref name="post-transactions-errors-sub-flow"
+				doc:name="POST /transactions-errors to sfl-crm-persona-sys-api" />
+			<module-logger:build-log-without-payload doc:name="Log Transaction Error Created"
+				config-ref="custom-logger-connector_config"
+				message="Transaction error record created successfully"
+				tracepoint="AFTER_HTTP_REQUEST"
+				entityDetails='#[output application/json ---&#10;{&#10;    "integrationError": payload.id default ""&#10;}]'
+				sourceSystem="#[vars.requestContext.sourceSystem]"
+				targetSystem="#[vars.requestContext.targetSystem]" />
+			<error-handler>
+				<on-error-continue doc:name="On Error Continue">
+					<module-logger:build-error-log-without-payload doc:name="LOG Async Error Flow Failure"
+						config-ref="custom-logger-connector_config"
+						message="Async error flow failed (transactions-errors or notification)"
+						tracepoint="EXCEPTION"
+						sourceSystem="#[vars.requestContext.sourceSystem default p('sourceSystem')]"
+						targetSystem="#[vars.requestContext.targetSystem default 'sfl-crm-persona-sys-api']"
+						errorType='#[output application/json ---
+vars.errorDetails.errorType.identifier default error.errorType.identifier default "UNKNOWN"]'
+						errorDescription='#[output application/json ---
+vars.errorDetails.message default payload.error.message default error.description default "Unhandled error"]'
+						cause='#[output application/json ---
+vars.errorDetails.cause.message default error.cause.message default ""]'
+						errorCode='#[vars.httpStatus default "500"]' />
+				</on-error-continue>
+			</error-handler>
+		</try>
+	</sub-flow>
+
+	<!--
+		Sets targetApiParams for POST /transactions-errors, then calls common-http-request-flow.
+		The DWL v-transaction-error-params.dwl builds the full payload including error context,
+		correlationId, sourceSystem, and optional externalReferenceId.
+	-->
+	<sub-flow name="post-transactions-errors-sub-flow" doc:name="POST /transactions-errors">
+		<ee:transform doc:name="Set targetApiParams for POST /transactions-errors">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-transaction-error-params.dwl" variableName="targetApiParams" />
+			</ee:variables>
+		</ee:transform>
+		<flow-ref name="common-http-request-flow"
+			doc:name="Flow Reference to common-http-request-flow (sfl-crm-persona-sys-api POST /transactions-errors)" />
+	</sub-flow>
+
+	<!-- Notification sub-flow: send alert via notification connector (add as needed) -->
+
+	<!-- Common success response helper: set httpStatus = 200 -->
+
+</mule>

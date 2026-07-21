@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+	xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+	<munit:config name="subscribe-channel-event-test-suite" minMuleVersion="4.9.0" />
+
+	<!--
+	===================================================================
+	TEST 1: SUCCESS — Subscribe Channel Event (Pattern A, PubSub gRPC)
+	Scenario: Valid event received, transformed, published to MQ,
+	          replayId retrieved and updated in Object Store.
+	===================================================================
+	-->
+	<munit:test name="subscribe-channel-event-success-test"
+		doc:name="subscribe-channel-event-success-test"
+		description="Pattern A: Valid event is transformed and published to MQ; replayId updated in OS">
+
+		<munit:behavior>
+			<!-- Mock os:retrieve — return currentReplayId = 0 -->
+			<munit-tools:mock-when processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="key" whereValue="replayId" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:target-variable variableName="currentReplayId" value="#[0]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock anypoint-mq:publish — return mock success response -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[readUrl('classpath://testdata/mq-publish-success.json', 'application/json')]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock os:store — no-op (verify separately via spy or assert call) -->
+			<munit-tools:mock-when processor="os:store">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="key" whereValue="replayId" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+
+			<!-- Mock all logger calls (both patterns — avoid AKV dependency in test) -->
+			<munit-tools:mock-when processor="module-logger:build-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload
+				value="#[readUrl('classpath://testdata/subscribe-channel-event-input.json', 'application/json')]"
+				doc:name="Set PubSub Event Payload" />
+			<flow-ref name="subscribe-channel-event-sub-flow" doc:name="Execute subscribe-channel-event-sub-flow" />
+		</munit:execution>
+
+		<munit:validation>
+			<!-- Verify MQ publish was called exactly once -->
+			<munit-tools:verify-call processor="anypoint-mq:publish" times="1">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+			<!-- Verify Object Store store was called exactly once (replayId update) -->
+			<munit-tools:verify-call processor="os:store" times="1">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="key" whereValue="replayId" />
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+		</munit:validation>
+	</munit:test>
+
+	<!--
+	===================================================================
+	TEST 2: MQ PUBLISH ERROR — Anypoint MQ publish fails
+	Scenario: MQ publish throws ANYPOINT-MQ:PUBLISHING.
+	          Global error handler catches; flow should not re-throw.
+	===================================================================
+	-->
+	<munit:test name="subscribe-channel-event-mq-error-test"
+		doc:name="subscribe-channel-event-mq-error-test"
+		description="Pattern A: MQ publish failure is caught by global error handler"
+		expectedErrorType="ANYPOINT-MQ:PUBLISHING">
+
+		<munit:behavior>
+			<!-- Mock os:retrieve -->
+			<munit-tools:mock-when processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="key" whereValue="replayId" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:target-variable variableName="currentReplayId" value="#[0]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock anypoint-mq:publish to throw an error -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="ANYPOINT-MQ:PUBLISHING" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock logger calls -->
+			<munit-tools:mock-when processor="module-logger:build-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-error-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-error-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload
+				value="#[readUrl('classpath://testdata/subscribe-channel-event-input.json', 'application/json')]"
+				doc:name="Set PubSub Event Payload" />
+			<flow-ref name="subscribe-channel-event-sub-flow" doc:name="Execute subscribe-channel-event-sub-flow" />
+		</munit:execution>
+	</munit:test>
+
+	<!--
+	===================================================================
+	TEST 3: DLQ PUBLISH ERROR — MQ publish fails AND DLQ also fails
+	Scenario: Both MQ and DLQ publish fail; DLQ sub-flow swallows
+	          the DLQ error and emits a CRITICAL log.
+	===================================================================
+	-->
+	<munit:test name="subscribe-channel-event-dlq-error-test"
+		doc:name="subscribe-channel-event-dlq-error-test"
+		description="Pattern A: DLQ publish failure is swallowed by mq-dlq-publish-sub-flow; CRITICAL log emitted">
+
+		<munit:behavior>
+			<!-- Mock os:retrieve -->
+			<munit-tools:mock-when processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="key" whereValue="replayId" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:target-variable variableName="currentReplayId" value="#[0]" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Primary MQ publish fails -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.queueName}" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="ANYPOINT-MQ:PUBLISHING" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- DLQ publish also fails -->
+			<munit-tools:mock-when processor="anypoint-mq:publish">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="destination" whereValue="${mq.dlq.name}" />
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="ANYPOINT-MQ:PUBLISHING" />
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+
+			<!-- Mock all logger calls -->
+			<munit-tools:mock-when processor="module-logger:build-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-error-log-without-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+			<munit-tools:mock-when processor="module-logger:build-error-log-with-encrypted-payload">
+				<munit-tools:then-return />
+			</munit-tools:mock-when>
+		</munit:behavior>
+
+		<munit:execution>
+			<set-payload
+				value="#[readUrl('classpath://testdata/subscribe-channel-event-input.json', 'application/json')]"
+				doc:name="Set PubSub Event Payload" />
+			<flow-ref name="mq-dlq-publish-sub-flow" doc:name="Execute mq-dlq-publish-sub-flow directly" />
+		</munit:execution>
+
+		<munit:validation>
+			<!-- CRITICAL log (build-error-log-without-payload) must have been called once in the DLQ error handler -->
+			<munit-tools:verify-call processor="module-logger:build-error-log-without-payload" times="1" />
+		</munit:validation>
+	</munit:test>
+
+</mule>

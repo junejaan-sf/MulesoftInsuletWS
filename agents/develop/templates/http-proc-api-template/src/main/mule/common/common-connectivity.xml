@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+		Reusable HTTP request flow used by all outbound SAPI calls.
+		Set vars.targetApiParams (via DWL) before calling this flow.
+		All request parameters (method, path, host, port, basePath, headers,
+		queryParams, uriParams, payload) are resolved from vars.targetApiParams.
+	-->
+	<flow name="common-http-request-flow" doc:name="Common HTTP Request Flow">
+		<until-successful maxRetries="${retry.attempts}" millisBetweenRetries="${retry.interval}" doc:name="Retry Until Successful">
+			<try doc:name="Try HTTP Request">
+				<http:request
+					method="#[vars.targetApiParams.requestMethod]"
+					path="#[vars.targetApiParams.requestPath]"
+					config-ref="outbound-sapi-http-request_config"
+					doc:name="HTTP Request to Downstream SAPI"
+					sendCorrelationId="ALWAYS">
+					<http:body><![CDATA[#[vars.targetApiParams.requestPayload]]]></http:body>
+					<http:headers><![CDATA[#[vars.targetApiParams.headers default {}]]]></http:headers>
+					<http:uri-params><![CDATA[#[vars.targetApiParams.uriParams default {}]]]></http:uri-params>
+					<http:query-params><![CDATA[#[vars.targetApiParams.queryParams default {}]]]></http:query-params>
+				</http:request>
+				<ee:transform doc:name="Set Success = true">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<!-- Retryable errors: propagate so until-successful can retry -->
+					<on-error-propagate type="${httpErrors}" doc:name="On Error Propagate HTTP Errors">
+						<ee:transform doc:name="FV Set Success = false, Error Details">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<!-- Non-retryable errors: continue, capture error + per-SAPI transaction ID -->
+					<on-error-continue doc:name="On Error Continue Other Errors">
+						<ee:transform doc:name="FV Set Success = false, Error Details, Transaction ID">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+								<!--
+									Maps the requestBasePath of the failing call to a per-SAPI error
+									catalog entry. Replace the p('...basePath') values with the actual
+									property keys for your downstream SAPIs.
+									e.g.: p('sfl.crm.persona.basePath'), p('sfl.consents.basePath')
+								-->
+								<ee:set-variable variableName="errorTransactionId"><![CDATA[%dw 2.0
+output application/json
+import buildErrorCatalog from errors::errorCatalog
+var errorCatalog = buildErrorCatalog(p('sourceSystem') default "")
+---
+if (!isEmpty(vars.targetApiParams.requestBasePath default "")) (vars.targetApiParams.requestBasePath match {
+	case s if s endsWith(Mule::p('primary.sapi.basePath'))   -> errorCatalog.primaryOperationFailed
+	case s if s endsWith(Mule::p('secondary.sapi.basePath')) -> errorCatalog.secondaryOperationFailed
+	case s if s endsWith(Mule::p('tertiary.sapi.basePath'))  -> errorCatalog.tertiaryOperationFailed
+	else -> errorCatalog.genericIntegrationError
+}) else ""]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+		<!-- Raise APP:CONNECTIVITY_FAILED if success == false after all retries -->
+		<flow-ref name="connectivity-error-handler-sub-flow" doc:name="Flow Reference to connectivity-error-handler-sub-flow" />
+		<error-handler>
+			<on-error-propagate doc:name="On Error Propagate">
+				<module-logger:build-error-log-without-payload doc:name="LOG ERROR"
+					config-ref="custom-logger-connector_config"
+					message="Error executing HTTP request to downstream SAPI"
+					logLevel="INFO"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					errorType='#[vars.errorDetails.errorType.identifier default "UNKNOWN"]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+</mule>

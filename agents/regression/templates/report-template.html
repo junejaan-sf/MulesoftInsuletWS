@@ -1,0 +1,347 @@
+<!--
+  Salesforce regression report - presentable HTML template.
+
+  Used by agents/regression/rules/sf-validation-from-postman.mdc (and the
+  generic regression-validate.mdc runner) when emitting the .html sibling of
+  every persisted .md report. The agent substitutes the {{TOKEN}} and
+  {{!--region--}} placeholders below with run-specific values.
+
+  Tokens (single-value):
+    {{TITLE}}                  e.g. "Salesforce Regression Run - na-drupal-exp-api"
+    {{RULESET_NAME}}           e.g. "na-drupal-exp-api (v1)"
+    {{ORG_ALIAS}}              e.g. "insulet-devint2"
+    {{API_VERSION}}            e.g. "v62.0"
+    {{PAYLOAD_LABEL}}          file path or "inline"
+    {{PATIENT_ID}}             captured primary entity Id, or "-" if missing
+    {{PATIENT_NAME}}           human label for the primary entity (e.g. "Lead <leadId>")
+    {{EXT_ASPN_ID}}            most distinctive external identifier in the payload, or "-"
+    {{RUN_TIMESTAMP}}          ISO local time, e.g. "2026-05-24T22:30 IST"
+    {{SINCE_ISO}}              context.since_iso
+    {{VERDICT_TEXT}}           "PASS" or "FAIL (N of TOTAL)"
+    {{VERDICT_TONE}}           "pass" or "fail"
+    {{STAT_TOTAL}}             integer
+    {{STAT_PASS}}              integer
+    {{STAT_FAIL}}              integer (sum of all FAIL_* statuses)
+    {{STAT_SKIPPED}}           integer (SKIPPED_GATE + SKIPPED_OPTIONAL)
+    {{DONUT_SLICES}}           4 <circle> elements - see "Donut math" below
+    {{DONUT_LEGEND_ITEMS}}     4 <li> legend items, one per status with the count
+    {{BAR_GROUPS}}             one <g class="bar-group"> per object family
+    {{BAR_X_LABELS}}           one <text> per family along the x-axis
+    {{Y_TICK_MAX}}             integer — top y-axis tick value
+    {{Y_TICK_MID}}             integer — mid y-axis tick value
+    {{ENTITY_ROWS}}            one <tr> per captured Salesforce record
+    {{RULE_ROWS}}              one <tr> per rule
+    {{FAILURE_DETAIL_SECTION}} entire <section> for failures; omit if no FAIL_*
+    {{FOLLOWUPS_GRID}}         one <article class="followup"> per recommendation
+    {{MARKDOWN_REPORT_PATH}}   relative path of the persisted .md sibling
+
+  Donut math (4 slices):
+    Use stroke-dasharray on a circle of r=60, cx=80, cy=80, stroke-width=24.
+    circumference = 2 * pi * r = 376.991.
+    For each slice s with value v and cumulative pre-arc P:
+      arcLen = (v / total) * circumference
+      gap    = circumference - arcLen
+      offset = -P  (rotates the start; SVG stroke goes clockwise by default
+                    when rotated -90deg via transform="rotate(-90 80 80)")
+      <circle r="60" cx="80" cy="80" fill="none"
+              stroke="var(--color-<tone>)"
+              stroke-width="24"
+              stroke-dasharray="<arcLen> <gap>"
+              stroke-dashoffset="<offset>"
+              transform="rotate(-90 80 80)" />
+    Skip slices whose v == 0 (do not render an empty arc).
+
+  Bar math (stacked):
+    Canvas: 760w x 260h. Plot area: x=60..740, y=24..220 (196px tall).
+    yMax = max family total, rounded up to a nice tick (5, 10, 20, ...).
+    Bar slot width = (740 - 60) / families.length, gutter 16px between groups.
+    Bar width = slotWidth - gutter.
+    For each family at index i:
+      slotStart = 60 + i * slotWidth
+      barX      = slotStart + gutter/2
+      baseY     = 220 (bottom of plot)
+      Stack order from bottom: PASS (success green), SKIPPED (info blue), FAIL (danger red).
+      For each stack with value v:
+        h = (v / yMax) * 196
+        <rect x={barX} y={baseY - cumulativeH - h} width={barW} height={h}
+              fill="var(--color-<tone>-bg-strong)"
+              stroke="var(--color-<tone>)" stroke-width="1" />
+        cumulativeH += h
+      <text x={barX + barW/2} y={235} class="bar-label">{family.short}</text>
+
+  Section omission:
+    If COUNTS.FAIL == 0, omit the entire failure-detail <section>
+    (delete from "<!--BEGIN failure-detail-->" through "<!--END failure-detail-->").
+    If FOLLOWUPS_GRID is empty, omit the entire followups <section> similarly.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}}</title>
+  <style>
+    :root {
+      --color-bg: #ffffff;
+      --color-surface: #fafafa;
+      --color-surface-2: #f3f4f6;
+      --color-text: #111827;
+      --color-text-secondary: #4b5563;
+      --color-text-tertiary: #9ca3af;
+      --color-border: #e5e7eb;
+      --color-border-strong: #d1d5db;
+      --color-success: #137333;
+      --color-success-bg: #e6f4ea;
+      --color-success-bg-strong: #b7e1c5;
+      --color-danger: #b00020;
+      --color-danger-bg: #fce8e6;
+      --color-danger-bg-strong: #f4b9b3;
+      --color-info: #1967d2;
+      --color-info-bg: #e8f0fe;
+      --color-info-bg-strong: #b6cffb;
+      --color-warning: #b06000;
+      --color-warning-bg: #fef3c7;
+      --color-warning-bg-strong: #fde68a;
+      --color-neutral: #5f6368;
+      --color-neutral-bg: #f1f3f4;
+      --color-neutral-bg-strong: #d8dadd;
+      --radius: 8px;
+      --radius-sm: 4px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: var(--font);
+      color: var(--color-text);
+      background: var(--color-bg);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1180px; margin: 0 auto; padding: 32px 32px 64px; }
+    h1 { font-size: 28px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+    h2 { font-size: 18px; font-weight: 600; margin: 0 0 8px; }
+    h3 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+    p { margin: 0; }
+    code, .mono { font-family: var(--mono); font-size: 0.92em; background: var(--color-surface-2); padding: 1px 6px; border-radius: var(--radius-sm); }
+    a { color: var(--color-info); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; border: 1px solid var(--color-border-strong); color: var(--color-text-secondary); background: var(--color-surface); }
+    .pill.tone-info     { color: var(--color-info);    border-color: var(--color-info-bg-strong);    background: var(--color-info-bg); }
+    .pill.tone-success  { color: var(--color-success); border-color: var(--color-success-bg-strong); background: var(--color-success-bg); }
+    .pill.tone-danger   { color: var(--color-danger);  border-color: var(--color-danger-bg-strong);  background: var(--color-danger-bg); }
+    .pill.tone-warning  { color: var(--color-warning); border-color: var(--color-warning-bg-strong); background: var(--color-warning-bg); }
+    .pill.tone-neutral  { color: var(--color-neutral); border-color: var(--color-neutral-bg-strong); background: var(--color-neutral-bg); }
+    .pill.verdict { font-size: 13px; font-weight: 600; padding: 5px 12px; }
+    .pill.size-sm { font-size: 11px; padding: 2px 8px; }
+
+    section { margin-top: 36px; }
+    .lede { color: var(--color-text-secondary); font-size: 14px; max-width: 820px; margin-bottom: 14px; }
+
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 24px; }
+    .stat { padding: 18px 20px; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-bg); }
+    .stat .value { font-size: 28px; font-weight: 600; line-height: 1.1; letter-spacing: -0.01em; }
+    .stat .label { font-size: 12px; color: var(--color-text-secondary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat.tone-success .value { color: var(--color-success); }
+    .stat.tone-danger  .value { color: var(--color-danger); }
+    .stat.tone-info    .value { color: var(--color-info); }
+
+    .charts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; margin-top: 24px; align-items: start; }
+    .card { border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-bg); overflow: hidden; }
+    .card > header { padding: 10px 16px; border-bottom: 1px solid var(--color-border); background: var(--color-surface); font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center; justify-content: space-between; }
+    .card > .body { padding: 16px; }
+    .caption { font-size: 12px; color: var(--color-text-tertiary); margin-top: 8px; }
+
+    .donut-wrap { display: flex; gap: 20px; align-items: center; }
+    .donut-wrap svg { flex: 0 0 160px; }
+    .legend { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+    .legend li { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+    .legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    .legend .swatch.tone-success { background: var(--color-success); }
+    .legend .swatch.tone-danger  { background: var(--color-danger); }
+    .legend .swatch.tone-info    { background: var(--color-info); }
+    .legend .swatch.tone-neutral { background: var(--color-neutral); }
+    .legend .count { margin-left: auto; color: var(--color-text-tertiary); font-variant-numeric: tabular-nums; }
+
+    table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    table thead th { text-align: left; font-weight: 600; font-size: 12px; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 12px; background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
+    table tbody td { padding: 10px 12px; border-bottom: 1px solid var(--color-border); vertical-align: top; }
+    table tbody tr:last-child td { border-bottom: none; }
+    .table-frame { border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    tr.row-tone-success td { background: rgba(19, 115, 51, 0.06); }
+    tr.row-tone-danger  td { background: rgba(176, 0, 32, 0.07); }
+    tr.row-tone-warning td { background: rgba(176, 96, 0, 0.07); }
+    tr.row-tone-info    td { background: rgba(25, 103, 210, 0.05); }
+    tr.row-tone-neutral td { background: var(--color-surface); }
+
+    .followups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .followup { border: 1px solid var(--color-border); border-radius: var(--radius); padding: 16px; background: var(--color-bg); }
+    .followup header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .followup h3 { margin: 0; font-size: 14px; }
+
+    .callout { border-left: 4px solid var(--color-danger); background: var(--color-danger-bg); padding: 12px 14px; border-radius: 0 var(--radius) var(--radius) 0; margin-bottom: 14px; font-size: 13px; }
+    .callout .title { font-weight: 600; color: var(--color-danger); margin-bottom: 2px; }
+
+    .field-causes { display: grid; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--color-border); }
+    .field-causes .item .field-name { font-weight: 600; }
+    .field-causes .item .cause { color: var(--color-text-secondary); font-size: 13px; margin-top: 2px; }
+
+    footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--color-border); color: var(--color-text-tertiary); font-size: 12px; }
+    footer p + p { margin-top: 6px; }
+
+    @media (max-width: 880px) {
+      .stats   { grid-template-columns: repeat(2, 1fr); }
+      .charts  { grid-template-columns: 1fr; }
+      .followups { grid-template-columns: 1fr; }
+      .container { padding: 20px; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .container { max-width: none; padding: 16px; }
+      .card, .followup, .table-frame { break-inside: avoid; }
+      .pill { border-width: 1px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+
+    <header>
+      <h1>{{TITLE}}</h1>
+      <p class="lede">
+        <code>{{RULESET_NAME}}</code> against <code>{{ORG_ALIAS}}</code>.
+        Primary entity <code>{{PATIENT_ID}}</code> ({{PATIENT_NAME}}) — external key
+        <code>{{EXT_ASPN_ID}}</code>.
+      </p>
+      <div class="meta-row">
+        <span class="pill tone-info">Org: {{ORG_ALIAS}}</span>
+        <span class="pill tone-info">API {{API_VERSION}}</span>
+        <span class="pill tone-neutral">Window since {{SINCE_ISO}}</span>
+        <span class="pill tone-neutral">Run at {{RUN_TIMESTAMP}}</span>
+        <span class="pill verdict tone-{{VERDICT_TONE}}">Verdict: {{VERDICT_TEXT}}</span>
+      </div>
+    </header>
+
+    <section class="stats" aria-label="Summary statistics">
+      <div class="stat">
+        <div class="value">{{STAT_TOTAL}}</div>
+        <div class="label">Rules executed</div>
+      </div>
+      <div class="stat tone-success">
+        <div class="value">{{STAT_PASS}}</div>
+        <div class="label">Pass</div>
+      </div>
+      <div class="stat tone-danger">
+        <div class="value">{{STAT_FAIL}}</div>
+        <div class="label">Fail</div>
+      </div>
+      <div class="stat tone-info">
+        <div class="value">{{STAT_SKIPPED}}</div>
+        <div class="label">Skipped</div>
+      </div>
+    </section>
+
+    <section class="charts" aria-label="Outcome charts">
+      <article class="card">
+        <header>Outcome distribution</header>
+        <div class="body">
+          <div class="donut-wrap">
+            <svg viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="Outcome donut chart">
+              {{DONUT_SLICES}}
+            </svg>
+            <ul class="legend">
+              {{DONUT_LEGEND_ITEMS}}
+            </ul>
+          </div>
+          <p class="caption">Skipped = gated by payload absence or downgraded when the sObject is not present in this org.</p>
+        </div>
+      </article>
+      <article class="card">
+        <header>Result by object family</header>
+        <div class="body">
+          <svg viewBox="0 0 760 260" width="100%" height="260" role="img" aria-label="Stacked bar chart of results by object family">
+            <line x1="60" y1="24"  x2="740" y2="24"  stroke="var(--color-border)" stroke-dasharray="2 4" />
+            <line x1="60" y1="122" x2="740" y2="122" stroke="var(--color-border)" stroke-dasharray="2 4" />
+            <line x1="60" y1="220" x2="740" y2="220" stroke="var(--color-border-strong)" />
+            <text x="48" y="28"  text-anchor="end" fill="var(--color-text-tertiary)" font-size="11">{{Y_TICK_MAX}}</text>
+            <text x="48" y="126" text-anchor="end" fill="var(--color-text-tertiary)" font-size="11">{{Y_TICK_MID}}</text>
+            <text x="48" y="224" text-anchor="end" fill="var(--color-text-tertiary)" font-size="11">0</text>
+            {{BAR_GROUPS}}
+            {{BAR_X_LABELS}}
+          </svg>
+          <div style="display:flex; gap:14px; margin-top:8px; font-size:12px; color:var(--color-text-secondary)">
+            <span><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--color-success);margin-right:6px"></span>Pass</span>
+            <span><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--color-info);margin-right:6px"></span>Skipped</span>
+            <span><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--color-danger);margin-right:6px"></span>Fail</span>
+          </div>
+          <p class="caption">X axis: Salesforce object family. Y axis: rule count. Stacked: pass / skipped / fail.</p>
+        </div>
+      </article>
+    </section>
+
+    <section aria-label="Captured Salesforce records">
+      <h2>Key Salesforce records that resulted from this payload</h2>
+      <p class="lede">The records below were located in <code>{{ORG_ALIAS}}</code> as the post-conditions of the upsert. Salesforce IDs are copy/paste-able into Setup.</p>
+      <div class="table-frame">
+        <table>
+          <thead>
+            <tr><th>Entity</th><th>From payload</th><th>Salesforce ID</th></tr>
+          </thead>
+          <tbody>
+            {{ENTITY_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-label="All rules">
+      <h2>All {{STAT_TOTAL}} rules</h2>
+      <p class="lede">One row per rule. Red rows indicate field-level mismatches against the expected post-condition; tinted rows are skipped (gate condition not satisfied, or optional sObject not present in this org).</p>
+      <div class="table-frame">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Rule</th>
+              <th>Object</th>
+              <th>Status</th>
+              <th class="num">Records</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{RULE_ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!--BEGIN failure-detail-->
+    {{FAILURE_DETAIL_SECTION}}
+    <!--END failure-detail-->
+
+    <!--BEGIN followups-->
+    <section aria-label="Recommended follow-ups">
+      <h2>Recommended follow-ups</h2>
+      <div class="followups">
+        {{FOLLOWUPS_GRID}}
+      </div>
+    </section>
+    <!--END followups-->
+
+    <footer>
+      <h3>How the run executed</h3>
+      <p>The Cursor agent walked the {{STAT_TOTAL}} rules in <code>{{RULESET_NAME}}</code> in topological order, rendered each rule's SOQL by substituting payload / captures / consts, and called the <code>user-salesforce-dx.run_soql_query</code> MCP tool for each one.</p>
+      <p>Full per-rule field tables and rendered SOQL are persisted in <code>{{MARKDOWN_REPORT_PATH}}</code>.</p>
+      <p>Time window for Integration_Error absence: <code>CreatedDate &gt;= {{SINCE_ISO}}</code>.</p>
+    </footer>
+
+  </main>
+</body>
+</html>

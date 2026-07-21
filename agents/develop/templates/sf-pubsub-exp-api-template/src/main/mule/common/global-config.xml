@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:salesforce-pub-sub="http://www.mulesoft.org/schema/mule/salesforce-pub-sub"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:azure-key-vault-properties-provider="http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:api-gateway="http://www.mulesoft.org/schema/mule/api-gateway"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+http://www.mulesoft.org/schema/mule/api-gateway http://www.mulesoft.org/schema/mule/api-gateway/current/mule-api-gateway.xsd
+http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider/current/mule-azure-key-vault-properties-provider.xsd
+http://www.mulesoft.org/schema/mule/salesforce-pub-sub http://www.mulesoft.org/schema/mule/salesforce-pub-sub/current/mule-salesforce-pub-sub.xsd
+http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!-- =============================================================
+	     Secrets Provider + Property Files
+	     ============================================================= -->
+	<azure-key-vault-properties-provider:config name="azure-key-vault-properties-provider_config"
+		doc:name="Azure Key Vault Properties Provider Config" />
+
+	<configuration-properties doc:name="env-properties_config"
+		file="properties/config-${mule.env}.properties" />
+	<configuration-properties doc:name="common-properties_config"
+		file="properties/config.properties" />
+
+	<!-- Default error handler for all flows in this app -->
+	<configuration doc:name="global-error-handler_config"
+		defaultErrorHandler-ref="global-error-handler" />
+
+	<!-- =============================================================
+	     HTTP Listener Config — /ping and /health-check endpoints
+	     ============================================================= -->
+	<http:listener-config name="api-listener_config" doc:name="HTTP Listener config">
+		<http:listener-connection
+			host="0.0.0.0"
+			port="${http.port}"
+			connectionIdleTimeout="${http.idleTimeout}"
+			readTimeout="${http.timeout}" />
+	</http:listener-config>
+
+	<!-- =============================================================
+	     APIKit Config
+	     Update resource URI once the RAML spec is published to Exchange.
+	     ============================================================= -->
+	<apikit:config name="sf-pubsub-exp-api-template_config"
+		api="resource::e0bc8c96-9dbd-48bc-915e-3e29577af6b3:sf-pubsub-exp-api-template-spec:${api.raml.version}:raml:zip:sf-pubsub-exp-api-template-spec.raml"
+		outboundHeadersMapName="outboundHeaders"
+		httpStatusVarName="httpStatus" />
+
+	<!-- =============================================================
+	     API Autodiscovery
+	     ============================================================= -->
+	<api-gateway:autodiscovery
+		apiId="${api.id}"
+		ignoreBasePath="true"
+		doc:name="api-autodiscovery_config"
+		flowRef="sf-pubsub-exp-api-template-main" />
+
+	<!-- =============================================================
+	     Custom Logger Connector Config
+	     Sensitive keys masked; encryption key sourced from AKV.
+	     ============================================================= -->
+	<module-logger:config name="custom-logger-connector_config"
+		doc:name="Custom Logger Connector Config"
+		encryptionKey="#[Mule::p('logger.encryptionKey')]"
+		sensitiveKeyParts="#[Mule::p('logger.sensitiveKeyParts')]"
+		safeKeys="#[Mule::p('logger.safeKeys')]" />
+
+	<!-- =============================================================
+	     PATTERN A: Salesforce PubSub Config (Subscribe Channel Listener)
+	     Connector: mule4-salesforce-pubsub-connector:1.2.0 (gRPC)
+	     Used by: sfl-subscribe-channel-event-listener-flow
+	     ============================================================= -->
+	<salesforce-pub-sub:pubsub-config name="salesforce-pubsub_config"
+		doc:name="Salesforce PubSub Config">
+		<salesforce-pub-sub:jwt-connection
+			consumerKey="${sfl.consumerkey}"
+			keyStore="${sfl.keystore}"
+			storePassword="${sfl.storepassword}"
+			certificateAlias="${sfl.certalias}"
+			principal="${sfl.principal}"
+			tokenEndpoint="${sfl.tokenUrl}"
+			audienceUrl="${sfl.audienceUrl}"
+			host="${sfl.pubsub.grpc.host}"
+			port="${sfl.pubsub.grpc.port}"
+			publishRequestTimeout="${sfl.pubsub.publishRequestTimeout}">
+			<reconnection>
+				<reconnect
+					frequency="${sfl.pubsub.reconnection.frequency}"
+					count="${sfl.pubsub.reconnection.attempts}" />
+			</reconnection>
+		</salesforce-pub-sub:jwt-connection>
+	</salesforce-pub-sub:pubsub-config>
+
+	<!-- =============================================================
+	     PATTERN B: Salesforce SFDC Config (Replay Channel Listener)
+	     Connector: mule-salesforce-connector (Streaming / CometD)
+	     Used by: sfl-replay-channel-event-listener-flow
+	     ============================================================= -->
+	<salesforce:sfdc-config name="salesforceConfig"
+		doc:name="Salesforce Config">
+		<salesforce:jwt-connection
+			consumerKey="${sfl.consumerkey}"
+			keyStore="${sfl.keystore}"
+			storePassword="${sfl.storepassword}"
+			certificateAlias="${sfl.certalias}"
+			principal="${sfl.principal}"
+			tokenEndpoint="${sfl.tokenUrl}"
+			audienceUrl="${sfl.audienceUrl}">
+			<reconnection>
+				<reconnect
+					frequency="${reconnection.frequency}"
+					count="${reconnection.attempts}" />
+			</reconnection>
+		</salesforce:jwt-connection>
+	</salesforce:sfdc-config>
+
+	<!-- =============================================================
+	     Anypoint MQ Config
+	     Shared by both patterns for primary queue and DLQ publishing.
+	     ============================================================= -->
+	<anypoint-mq:config name="anypoint-mq_config" doc:name="Anypoint MQ Config">
+		<anypoint-mq:connection
+			url="${mq.url}"
+			clientId="${mq.app.clientId}"
+			clientSecret="${mq.app.clientSecret}">
+			<reconnection>
+				<reconnect
+					frequency="${mq.reconnection.frequency}"
+					count="${mq.reconnection.attempts}" />
+			</reconnection>
+			<anypoint-mq:tcp-client-socket-properties
+				connectionTimeout="${mq.connectionTimeout}" />
+		</anypoint-mq:connection>
+	</anypoint-mq:config>
+
+	<!-- =============================================================
+	     Object Store — replayId persistence for Pattern A
+	     Pattern B uses FROM_LAST_REPLAY_ID and does not require an Object Store.
+	     ============================================================= -->
+	<os:object-store name="pub-sub-object-store_config"
+		doc:name="Object store"
+		expirationIntervalUnit="DAYS"
+		entryTtl="${sfl.pubSub.os.entryTtl}"
+		expirationInterval="${sfl.pubSub.os.expirationInterval}" />
+
+</mule>

@@ -1,0 +1,12 @@
+{
+  "optionalItems": [
+    {
+      "name": "SampleConsentName",
+      "status": "Opt-out",
+      "source": "Online"
+    }
+  ],
+  "campaignName": "SampleCampaignName",
+  "secondaryId": "IND001",
+  "primaryField": "primary-value"
+}

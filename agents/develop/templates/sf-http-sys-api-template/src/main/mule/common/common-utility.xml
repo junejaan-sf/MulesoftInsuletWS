@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+		http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd">
+
+	<!-- =========================================================
+	     RECORD TYPE CACHE SUB-FLOW — ObjectStore cache-first pattern
+	
+	     Purpose: Retrieve a Salesforce RecordType ID by cache key,
+	     fetching from Salesforce only on a cache miss.
+	
+	     Pre-condition: caller must set vars.osKey to the ObjectStore
+	     key (e.g., Mule::p('os.recordTypeId.SObjectName')).
+	
+	     Post-condition: payload = RecordType ID string (or []) on hit;
+	     payload = re-retrieved RecordType ID after SOQL + OS store.
+	
+	     Flow:
+	       1. os:retrieve by vars.osKey (default [])
+	       2. Choice: isEmpty?
+	            YES (cache miss):
+	              a. LOG cache miss
+	              b. Set vars.queryPayload via p-set-record-type-query.dwl
+	              c. execute-sf-query-flow → results
+	              d. DW map results → {Id, SobjectType, Name}[]
+	              e. foreach → os:store each record type
+	              f. os:retrieve by vars.osKey again
+	              g. LOG cache populated
+	            NO (cache hit):
+	              a. LOG cache hit
+	     ========================================================= -->
+	<sub-flow name="common-retrieve-record-type-sub-flow" doc:id="77777777-ffff-aaaa-bbbb-000000000082">
+
+		<!-- Step 1: Attempt cache read -->
+		<os:retrieve
+			doc:name="Retrieve Record Type Id"
+			doc:id="88888888-ffff-aaaa-bbbb-000000000083"
+			key="#[vars.osKey default Mule::p('os.recordTypeId.SObjectName')]"
+			objectStore="Object-store_config">
+			<os:default-value><![CDATA[#[[]]]]></os:default-value>
+		</os:retrieve>
+
+		<!-- Step 2: Branch on cache hit vs miss -->
+		<choice doc:name="CHECK if RecordType in ObjectStore" doc:id="99999999-ffff-aaaa-bbbb-000000000084">
+
+			<!-- CACHE MISS: query Salesforce and populate ObjectStore -->
+			<when expression="#[isEmpty(payload)]">
+				<module-logger:build-log-without-payload
+					doc:name="Log RecordType Cache Miss"
+					doc:id="aaaaaaaa-ffff-aaaa-bbbb-000000000085"
+					config-ref="custom-logger-connector_config"
+					message="ObjectStore does not contain RecordType ID — retrieving from Salesforce"
+					entityDetails='#[output application/json --- { "key": vars.osKey }]'
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]" />
+
+				<!-- Build SOQL for active RecordTypes from p-set-record-type-query.dwl -->
+				<ee:transform doc:name="Set Record Type Query" doc:id="bbbbbbbb-ffff-aaaa-bbbb-000000000086">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable resource="dwls/p-set-record-type-query.dwl" variableName="queryPayload" />
+					</ee:variables>
+				</ee:transform>
+
+				<!-- Query Salesforce -->
+				<flow-ref doc:name="execute-sf-query-flow" doc:id="cccccccc-ffff-aaaa-bbbb-000000000087" name="execute-sf-query-flow" />
+
+				<!-- Map results to storable format: { Id, SobjectType, Name }[] -->
+				<ee:transform doc:name="DW Map RecordTypes for ObjectStore" doc:id="dddddddd-ffff-aaaa-bbbb-000000000088">
+					<ee:message>
+						<ee:set-payload resource="dwls/p-set-record-type-mappings.dwl" />
+					</ee:message>
+				</ee:transform>
+
+				<!-- Store each RecordType under "SobjectType|Name" key -->
+				<foreach doc:name="Store Record Types to ObjectStore" doc:id="eeeeeeee-ffff-aaaa-bbbb-000000000089">
+					<os:store
+						doc:name="Storing Record Type Id to OS"
+						doc:id="ffffffff-ffff-aaaa-bbbb-000000000090"
+						key='#[payload.SobjectType ++ "|" ++ payload.Name]'
+						objectStore="Object-store_config">
+						<os:value><![CDATA[#[payload.Id]]]></os:value>
+					</os:store>
+				</foreach>
+
+				<!-- Re-retrieve the specific key now that cache is populated -->
+				<os:retrieve
+					doc:name="Retrieve Record Type Id"
+					doc:id="11111111-aaaa-1111-bbbb-000000000091"
+				key="#[vars.osKey default Mule::p('os.recordTypeId.SObjectName')]"
+				objectStore="Object-store_config">
+				<os:default-value><![CDATA[#[[]]]]></os:default-value>
+			</os:retrieve>
+
+				<module-logger:build-log-without-payload
+					doc:name="Log RecordType Id Retrieved"
+					doc:id="22222222-aaaa-1111-bbbb-000000000092"
+					config-ref="custom-logger-connector_config"
+					message="RecordType ID successfully retrieved from Salesforce and stored in ObjectStore"
+					tracepoint="FLOW_END"
+					entityDetails="#[output application/json --- { (vars.osKey): payload }]"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]" />
+			</when>
+
+			<!-- CACHE HIT: use cached value directly -->
+			<otherwise>
+				<module-logger:build-log-without-payload
+					doc:name="Log RecordType Id from Cache"
+					doc:id="33333333-aaaa-1111-bbbb-000000000093"
+					config-ref="custom-logger-connector_config"
+					message="RecordType ID successfully retrieved from ObjectStore"
+					tracepoint="FLOW_END"
+					entityDetails="#[output application/json --- { (vars.osKey): payload }]"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]" />
+			</otherwise>
+		</choice>
+	</sub-flow>
+
+</mule>

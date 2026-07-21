@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!-- =========================================================
+	     Publish to MQ Sub-Flow
+	     Called from: subscribe-channel-event-sub-flow (Pattern A)
+	                  replay-channel-event-sub-flow    (Pattern B)
+	     Expects:
+	       payload           — the transformed MQ message body (from p-mq-publish-payload.dwl)
+	       vars.requestContext — correlation context (from v-request-context.dwl)
+	       vars.mqProperties  — MQ user-properties header map (from v-mq-properties.dwl)
+	     ========================================================= -->
+	<sub-flow name="mq-publish-sub-flow" doc:name="mq-publish-sub-flow">
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="Log Publishing to MQ"
+			config-ref="custom-logger-connector_config"
+			message="Publishing Message to Anypoint MQ"
+			tracepoint="APPLICATION_EVENT"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": vars.requestContext.replayId default "No replayId received in payload",
+	"eventId": vars.requestContext.eventId default "No eventId received in payload"
+}]'>
+			<module-logger:body><![CDATA[#[output application/json ---
+{
+	"Payload to be published to MQ": payload,
+	"MQ User Properties": vars.mqProperties
+}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+		<anypoint-mq:publish
+			doc:name="Publish to MQ"
+			config-ref="anypoint-mq_config"
+			destination="${mq.queueName}">
+			<anypoint-mq:properties><![CDATA[#[vars.mqProperties]]]></anypoint-mq:properties>
+		</anypoint-mq:publish>
+		<module-logger:build-log-without-payload
+			doc:name="Log Message Published to MQ"
+			config-ref="custom-logger-connector_config"
+			message="#[Mule::p('message.successfulAcknowledgement')]"
+			tracepoint="APPLICATION_EVENT"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails='#[output application/json
+---
+{
+	"replayId": vars.requestContext.replayId default "No replayId received in payload",
+	"eventId": vars.requestContext.eventId default "No eventId received in payload"
+}]' />
+	</sub-flow>
+
+	<!-- =========================================================
+	     Publish to DLQ Sub-Flow
+	     Called from: global-error-handler (on error in any SF listener flow)
+	     Wrapped in try/on-error-continue — never re-throws.
+	     Emits CRITICAL log if DLQ publish also fails.
+	     ========================================================= -->
+	<sub-flow name="mq-dlq-publish-sub-flow" doc:name="mq-dlq-publish-sub-flow">
+		<try doc:name="Try DLQ Publish">
+			<anypoint-mq:publish
+				doc:name="Publish to DLQ"
+				config-ref="anypoint-mq_config"
+				destination="${mq.dlq.name}">
+				<anypoint-mq:body><![CDATA[#[%dw 2.0
+output application/json
+---
+payload]]]></anypoint-mq:body>
+				<anypoint-mq:properties><![CDATA[#[{
+	"replayId": vars.requestContext.replayId default "",
+	"correlationId": correlationId,
+	"SourceSystem": p('app.name')
+}]]]></anypoint-mq:properties>
+			</anypoint-mq:publish>
+			<module-logger:build-log-without-payload
+				doc:name="Log DLQ Success"
+				config-ref="custom-logger-connector_config"
+				message="Failed message published to DLQ"
+				tracepoint="FLOW_END"
+				entityDetails='#[output application/json
+---
+{
+	"messageId": attributes.messageId default ""
+}]'
+				sourceSystem="#[p('sourceSystem')]"
+				targetSystem="#[p('targetSystem')]" />
+			<error-handler>
+				<on-error-continue enableNotifications="true" logException="true"
+					doc:name="DLQ Publish Failed" type="ANY">
+					<module-logger:build-error-log-without-payload
+						doc:name="Log DLQ Failure"
+						config-ref="custom-logger-connector_config"
+						message="CRITICAL: Failed to publish to DLQ"
+						tracepoint="EXCEPTION"
+						sourceSystem="#[p('sourceSystem')]"
+						targetSystem="#[p('targetSystem')]"
+						errorType='#[(error.errorType.identifier default (error.errorType as String) default "UNKNOWN") as String]'
+						errorDescription='#[(error.description default "Unhandled error") as String]'
+						cause='#[(error.cause.message default error.cause default "") as String]'
+						errorCode="#[(attributes.httpStatus default null)]"
+						logLevel="INFO" />
+				</on-error-continue>
+			</error-handler>
+		</try>
+	</sub-flow>
+
+</mule>

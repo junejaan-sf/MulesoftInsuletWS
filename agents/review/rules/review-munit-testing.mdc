@@ -1,0 +1,49 @@
+---
+description: Enforces MUnit testing standards and coverage requirements during code reviews
+globs: **/src/test/**/*.xml
+alwaysApply: false
+---
+
+# MUnit Testing Standards
+
+## Test Suite Organization
+- One test suite per Mule flow file (one-to-one correlation)
+- Test suites are located under `src/test/munit/`
+- Test resource files (payloads, assertions) go under `src/test/resources/`
+
+## Minimum Coverage
+- **At least 70% code coverage** per test suite
+- **At least 70% overall coverage** when all suites are run together
+- Account for processors imported from shared libraries (may not be coverable)
+
+## Required Test Cases
+- Each flow must have **at least one positive test** (happy path)
+- Each flow must have **at least one negative test** (error handling path)
+- Test both success responses and error responses for each endpoint
+
+## Mocking
+- All calls to backend/external resources **must be mocked**
+- Never make real HTTP calls or database queries in unit tests
+- Use MUnit mocks for HTTP Request, Database, Salesforce, Anypoint MQ connectors
+
+## Test Naming
+- Follow the same naming conventions as implementation flows
+- Test names should clearly indicate what is being tested and the expected outcome
+- Example: `post:\addressValidation:application\json:na-sf-exp-api-config-test-error`
+
+## Test Data
+- Use per-endpoint folders for test event data (payload, attributes, variables)
+- DWL files for setting event data: `set-event_payload.dwl`, `set-event_attributes.dwl`
+- DWL files for assertions: `assert_expression_payload.dwl`
+- JSON fixtures for mock responses in their own folders
+
+## Pre-Commit Verification
+- Run `mvn clean test -P<profile>` from command line before committing
+- All test suites must pass with 100% success rate
+
+## Review Checklist
+- [ ] At least one positive and one negative test per flow
+- [ ] All external calls are mocked
+- [ ] Code coverage meets 70% minimum threshold
+- [ ] Test data is organized in per-endpoint folders
+- [ ] Tests pass via `mvn clean test`

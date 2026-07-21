@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:api-gateway="http://www.mulesoft.org/schema/mule/api-gateway"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:azure-key-vault-properties-provider="http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:module-notification="http://www.mulesoft.org/schema/mule/module-notification"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+		http://www.mulesoft.org/schema/mule/api-gateway http://www.mulesoft.org/schema/mule/api-gateway/current/mule-api-gateway.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/module-notification http://www.mulesoft.org/schema/mule/module-notification/current/mule-module-notification.xsd
+		http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider/current/mule-azure-key-vault-properties-provider.xsd">
+
+	<!-- =========================================================
+	     AZURE KEY VAULT — secure properties provider
+	     All credentials and the logger encryption key are sourced
+	     from AKV at runtime; never hardcode secrets.
+	     ========================================================= -->
+	<azure-key-vault-properties-provider:config
+		name="azure-key-vault-properties-provider_config"
+		doc:name="Azure Key Vault Properties Provider Config"
+		doc:id="11111111-aaaa-bbbb-cccc-000000000001" />
+
+	<!-- =========================================================
+	     PROPERTIES — environment-specific then common
+	     ========================================================= -->
+	<configuration-properties
+		file="properties/config-${mule.env}.properties"
+		doc:name="env-properties_config"
+		doc:id="22222222-aaaa-bbbb-cccc-000000000002" />
+	<configuration-properties
+		file="properties/config.properties"
+		doc:name="common-properties_config"
+		doc:id="33333333-aaaa-bbbb-cccc-000000000003" />
+
+	<!-- =========================================================
+	     GLOBAL ERROR HANDLER reference
+	     ========================================================= -->
+	<configuration
+		doc:name="global-error-handler_config"
+		doc:id="44444444-aaaa-bbbb-cccc-000000000004"
+		defaultErrorHandler-ref="global-error-handler" />
+
+	<!-- =========================================================
+	     HTTP LISTENER
+	     ========================================================= -->
+	<http:listener-config
+		name="global-http-listener_config"
+		doc:name="HTTP Listener Config"
+		doc:id="55555555-aaaa-bbbb-cccc-000000000005">
+		<http:listener-connection
+			host="0.0.0.0"
+			port="${http.port}"
+			connectionIdleTimeout="${http.idleTimeout}"
+			readTimeout="${http.timeout}" />
+	</http:listener-config>
+
+	<!-- =========================================================
+	     APIKIT CONFIGURATION
+	     Update the RAML resource URI (groupId, artifactId, version)
+	     once the spec is published to Exchange.
+	     Replace "http-proc-api-template-spec" and "1.0.0" with the
+	     actual spec artifact ID and version for your project.
+	     ========================================================= -->
+	<apikit:config
+		name="http-proc-api-template-spec-config"
+		doc:name="APIKit Config"
+		doc:id="66666666-aaaa-bbbb-cccc-000000000006"
+		api="resource::e0bc8c96-9dbd-48bc-915e-3e29577af6b3:http-proc-api-template-spec:1.0.0:raml:zip:http-proc-api-template-spec.raml"
+		outboundHeadersMapName="outboundHeaders"
+		httpStatusVarName="httpStatus" />
+
+	<!-- =========================================================
+	     API AUTODISCOVERY
+	     api.id is set per environment in config-{env}.properties.
+	     ========================================================= -->
+	<api-gateway:autodiscovery
+		apiId="${api.id}"
+		ignoreBasePath="true"
+		doc:name="api-autodiscovery_config"
+		doc:id="77777777-aaaa-bbbb-cccc-000000000007"
+		flowRef="http-proc-api-template-main" />
+
+	<!-- =========================================================
+	     CUSTOM LOGGER CONNECTOR
+	     encryptionKey from AKV — never hardcoded.
+	     sensitiveKeyParts masks PII fields in all log payloads.
+	     safeKeys allowlists correlation / transaction IDs.
+	     ========================================================= -->
+	<module-logger:config
+		name="custom-logger-connector_config"
+		doc:name="Custom Logger Connector Config"
+		doc:id="88888888-aaaa-bbbb-cccc-000000000008"
+		sensitiveKeyParts="${logger.sensitiveKeyParts}"
+		safeKeys="${logger.safeKeys}"
+		encryptionKey="${logger.encryptionKey}" />
+
+	<!-- =========================================================
+	     NOTIFICATION CONNECTOR
+	     ========================================================= -->
+	<module-notification:config
+		name="notification-connector_config"
+		doc:name="Notification Connector Config"
+		doc:id="99999999-aaaa-bbbb-cccc-000000000009" />
+
+	<!-- =========================================================
+	     SINGLE DYNAMIC OUTBOUND HTTP REQUEST CONFIG
+	     All downstream SAPIs share this one config.
+	     host, port, and basePath are resolved from
+	     vars.targetApiParams at runtime before each outbound call.
+
+	     The connection pool defaults to primary.sapi.* at startup.
+	     Actual routing per-call uses values in vars.targetApiParams.
+
+	     Replace "primary.sapi" references with your primary
+	     downstream SAPI name (e.g., "sfl.crm.persona").
+	     ========================================================= -->
+	<http:request-config
+		name="outbound-sapi-http-request_config"
+		doc:name="outbound-http-request_config"
+		doc:id="aaaaaaaa-aaaa-bbbb-cccc-000000000010"
+		basePath="#[vars.targetApiParams.requestBasePath default '']"
+		responseTimeout="${request.timeout}">
+		<http:request-connection
+			protocol="${primary.sapi.protocol}"
+			host="#[(vars.targetApiParams.requestHost default p('primary.sapi.host')) as String]"
+			port="#[(vars.targetApiParams.requestPort default p('primary.sapi.port')) as Number]"
+			connectionIdleTimeout="${request.idleTimeout}" />
+	</http:request-config>
+
+</mule>

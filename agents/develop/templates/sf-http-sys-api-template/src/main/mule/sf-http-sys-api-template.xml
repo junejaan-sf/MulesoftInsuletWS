@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!-- =========================================================
+	     MAIN FLOW
+	     Entry point for all REST requests. Sets requestContext,
+	     routes via APIKit, applies global error handler.
+	     ========================================================= -->
+	<flow name="sf-http-sys-api-template-main" doc:id="a1b2c3d4-e5f6-7890-abcd-ef1234567891">
+		<http:listener path="${http.basePath}" config-ref="global-http-listener_config" doc:name="HTTP Listener">
+			<http:response statusCode="#[vars.httpStatus default 200]">
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:response>
+			<http:error-response statusCode="#[vars.httpStatus default 500]">
+				<http:body><![CDATA[#[payload]]]></http:body>
+				<http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+			</http:error-response>
+		</http:listener>
+		<ee:transform doc:name="FV Set Request Context" doc:id="b2c3d4e5-f6a7-8901-bcde-f12345678902">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/v-request-context.dwl" variableName="requestContext" />
+			</ee:variables>
+		</ee:transform>
+		<apikit:router config-ref="sf-http-sys-api-template-spec-config" doc:name="APIKit Router" />
+		<error-handler ref="global-error-handler" />
+	</flow>
+
+	<!-- =========================================================
+	     LIVENESS — GET /ping
+	     Returns a lightweight alive response; no downstream calls.
+	     ========================================================= -->
+	<flow name="get:\ping:sf-http-sys-api-template-spec-config" doc:id="c3d4e5f6-a7b8-9012-cdef-123456789013">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="d4e5f6a7-b8c9-0123-defa-234567890124"
+			config-ref="custom-logger-connector_config"
+			message="get:\ping"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<ee:transform doc:name="DW Set Aliveness Response" doc:id="e5f6a7b8-c9d0-1234-efab-345678901235">
+			<ee:message>
+				<ee:set-payload resource="dwls/p-set-liveness-response.dwl" />
+			</ee:message>
+		</ee:transform>
+		<module-logger:build-log-without-payload doc:name="LOG EXIT" doc:id="f6a7b8c9-d0e1-2345-fabc-456789012346"
+			config-ref="custom-logger-connector_config"
+			message="get:\ping"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     READINESS — GET /health-check
+	     Checks Salesforce connectivity via get-server-timestamp.
+	     ========================================================= -->
+	<flow name="get:\health-check:sf-http-sys-api-template-spec-config" doc:id="a7b8c9d0-e1f2-3456-abcd-567890123457">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="b8c9d0e1-f2a3-4567-bcde-678901234568"
+			config-ref="custom-logger-connector_config"
+			message="get:\health-check"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref doc:name="healthcheck-sub-flow" doc:id="c9d0e1f2-a3b4-5678-cdef-789012345679" name="healthcheck-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT" doc:id="d0e1f2a3-b4c5-6789-defa-890123456780"
+			config-ref="custom-logger-connector_config"
+			message="get:\health-check"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     CREATE — POST /records
+	     Creates a new record in Salesforce.
+	     ========================================================= -->
+	<flow name="post:\records:application\json:sf-http-sys-api-template-spec-config" doc:id="e1f2a3b4-c5d6-7890-efab-901234567891">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="f2a3b4c5-d6e7-8901-fabc-012345678902"
+			config-ref="custom-logger-connector_config"
+			message="post:\records"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref doc:name="create-record-sub-flow" doc:id="a3b4c5d6-e7f8-9012-abcd-123456789013" name="create-record-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT" doc:id="b4c5d6e7-f8a9-0123-bcde-234567890124"
+			config-ref="custom-logger-connector_config"
+			message="post:\records"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     GET — GET /records
+	     Queries Salesforce for records.
+	     ========================================================= -->
+	<flow name="get:\records:sf-http-sys-api-template-spec-config" doc:id="c5d6e7f8-a9b0-1234-cdef-345678901235">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="d6e7f8a9-b0c1-2345-defa-456789012346"
+			config-ref="custom-logger-connector_config"
+			message="get:\records"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref doc:name="get-records-sub-flow" doc:id="e7f8a9b0-c1d2-3456-efab-567890123457" name="get-records-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT" doc:id="f8a9b0c1-d2e3-4567-fabc-678901234568"
+			config-ref="custom-logger-connector_config"
+			message="get:\records"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     UPDATE — PUT /records/{id}
+	     Upserts a record in Salesforce by ID.
+	     ========================================================= -->
+	<flow name="put:\records\(id):application\json:sf-http-sys-api-template-spec-config" doc:id="a9b0c1d2-e3f4-5678-abcd-789012345679">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="b0c1d2e3-f4a5-6789-bcde-890123456780"
+			config-ref="custom-logger-connector_config"
+			message="put:\records\(id)"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref doc:name="update-record-sub-flow" doc:id="c1d2e3f4-a5b6-7890-cdef-901234567891" name="update-record-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT" doc:id="d2e3f4a5-b6c7-8901-defa-012345678902"
+			config-ref="custom-logger-connector_config"
+			message="put:\records\(id)"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+	<!-- =========================================================
+	     COMPOSITE — POST /composites
+	     Executes a Salesforce composite request.
+	     Remove this flow if composite operations are not needed.
+	     ========================================================= -->
+	<flow name="post:\composites:application\json:sf-http-sys-api-template-spec-config" doc:id="e3f4a5b6-c7d8-9012-efab-123456789013">
+		<module-logger:build-log-without-payload doc:name="LOG ENTRY" doc:id="f4a5b6c7-d8e9-0123-fabc-234567890124"
+			config-ref="custom-logger-connector_config"
+			message="post:\composites"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+		<flow-ref doc:name="sf-composite-request-sub-flow" doc:id="a5b6c7d8-e9f0-1234-abcd-345678901235" name="sf-composite-request-sub-flow" />
+		<module-logger:build-log-without-payload doc:name="LOG EXIT" doc:id="b6c7d8e9-f0a1-2345-bcde-456789012346"
+			config-ref="custom-logger-connector_config"
+			message="post:\composites"
+			tracepoint="FLOW_END"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]" />
+	</flow>
+
+</mule>

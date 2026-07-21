@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+	    common-connectivity.xml
+	    Per-system named request flows. Each flow:
+	      1. LOG BEFORE REQUEST (encrypted)
+	      2. until-successful (retry on transient httpErrors)
+	         try → http:request → set success/errorDetails
+	      3. check-for-raise-error-sub-flow (raises APP:CONNECTIVITY_FAILED on failure)
+	      4. LOG AFTER REQUEST (encrypted)
+	      5. on-error-propagate ANY → LOG ERROR (without payload)
+
+	    Callers set vars.targetApiParams (from a v-targetApiParams-*.dwl file)
+	    before flow-ref'ing to the named flow.
+	    No generic common-http-request-flow — each system has its own named flow.
+	-->
+
+	<!-- =====================================================================
+	     {downstream-sys-api} Request Flow
+	     Replace {downstream-sys-api} and the config-ref with the actual system API
+	     name and its corresponding http:request-config from global-config.xml.
+	     Used by: mq-consumer-sub-flow (main business processing)
+	              health-check-ready-sub-flow (readiness check)
+	     ===================================================================== -->
+	<flow name="{downstream-sys-api}-request-flow" doc:name="{downstream-sys-api}-request-flow">
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG BEFORE REQUEST"
+			config-ref="custom-logger-connector_config"
+			message="Invoking {downstream-sys-api} request"
+			tracepoint="BEFORE_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails="#[vars.requestContext.entityDetails default null]">
+			<module-logger:body><![CDATA[#[output application/json ---
+{
+    requestBody: vars.targetApiParams.requestPayload default null,
+    queryParams: vars.targetApiParams.queryParams default {},
+    uriParams: vars.targetApiParams.uriParams default {}
+}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<until-successful maxRetries="${retry.attempts}" millisBetweenRetries="${retry.interval}" doc:name="Retry">
+			<try doc:name="Try Outbound Request">
+				<http:request
+					method="#[vars.targetApiParams.requestMethod]"
+					path="#[vars.targetApiParams.requestPath]"
+					config-ref="{downstream-sys-api}_httpRequest_config"
+					doc:name="REQUEST {downstream-sys-api}"
+					sendCorrelationId="ALWAYS">
+					<http:body><![CDATA[#[vars.targetApiParams.requestPayload]]]></http:body>
+					<http:headers><![CDATA[#[vars.targetApiParams.headers default {}]]]></http:headers>
+					<http:uri-params><![CDATA[#[vars.targetApiParams.uriParams default {}]]]></http:uri-params>
+					<http:query-params><![CDATA[#[vars.targetApiParams.queryParams default {}]]]></http:query-params>
+				</http:request>
+				<ee:transform doc:name="FV Set Success = true, Error = null">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate type="${httpErrors}" doc:name="On Error Propagate (Retry)">
+						<ee:transform doc:name="FV Set Success = false, Error Details">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue doc:name="On Error Continue (Non-Retryable)">
+						<ee:transform doc:name="FV Set Success = false, Error Details">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+
+		<flow-ref doc:name="Flow Reference to check-for-raise-error-sub-flow"
+			name="check-for-raise-error-sub-flow" />
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG AFTER REQUEST"
+			config-ref="custom-logger-connector_config"
+			message="Response received from {downstream-sys-api}"
+			tracepoint="AFTER_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails="#[vars.requestContext.entityDetails default null]">
+			<module-logger:body><![CDATA[#[output application/json --- payload]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<error-handler>
+			<on-error-propagate type="ANY" doc:name="On Error Propagate">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					config-ref="custom-logger-connector_config"
+					message="{downstream-sys-api} request failed"
+					logLevel="ERROR"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					entityDetails="#[vars.requestContext.entityDetails default null]"
+					errorType='#[(vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN")]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+	<!-- =====================================================================
+	     SFL CRM Persona Sys API Request Flow
+	     Used by: common-log-integration-error-details-sub-flow
+	              health-check-ready-sub-flow (readiness check)
+	     Logs integration errors into Salesforce via persona composite API.
+	     ===================================================================== -->
+	<flow name="sfl-crm-persona-sys-api-request-flow" doc:name="sfl-crm-persona-sys-api-request-flow">
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG BEFORE REQUEST"
+			config-ref="custom-logger-connector_config"
+			message="Invoking sfl-crm-persona-sys-api request"
+			tracepoint="BEFORE_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails="#[vars.requestContext.entityDetails default null]">
+			<module-logger:body><![CDATA[#[output application/json ---
+{
+    requestBody: vars.targetApiParams.requestPayload default null
+}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<until-successful maxRetries="${retry.attempts}" millisBetweenRetries="${retry.interval}" doc:name="Retry">
+			<try doc:name="Try Outbound Request">
+				<http:request
+					method="#[vars.targetApiParams.requestMethod]"
+					path="#[vars.targetApiParams.requestPath]"
+					config-ref="sfl-crm-persona-sys-api_httpRequest_config"
+					doc:name="REQUEST sfl-crm-persona-sys-api"
+					sendCorrelationId="ALWAYS">
+					<http:body><![CDATA[#[vars.targetApiParams.requestPayload]]]></http:body>
+					<http:headers><![CDATA[#[vars.targetApiParams.headers default {}]]]></http:headers>
+					<http:uri-params><![CDATA[#[vars.targetApiParams.uriParams default {}]]]></http:uri-params>
+					<http:query-params><![CDATA[#[vars.targetApiParams.queryParams default {}]]]></http:query-params>
+				</http:request>
+				<ee:transform doc:name="FV Set Success = true, Error = null">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate type="${httpErrors}" doc:name="On Error Propagate (Retry)">
+						<ee:transform doc:name="FV Set Success = false, Error Details">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue doc:name="On Error Continue (Non-Retryable)">
+						<ee:transform doc:name="FV Set Success = false, Error Details">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+
+		<flow-ref doc:name="Flow Reference to check-for-raise-error-sub-flow"
+			name="check-for-raise-error-sub-flow" />
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG AFTER REQUEST"
+			config-ref="custom-logger-connector_config"
+			message="Response received from sfl-crm-persona-sys-api"
+			tracepoint="AFTER_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]"
+			entityDetails="#[vars.requestContext.entityDetails default null]">
+			<module-logger:body><![CDATA[#[output application/json --- payload]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<error-handler>
+			<on-error-propagate type="ANY" doc:name="On Error Propagate">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					config-ref="custom-logger-connector_config"
+					message="sfl-crm-persona-sys-api request failed"
+					logLevel="ERROR"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					entityDetails="#[vars.requestContext.entityDetails default null]"
+					errorType='#[(vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN")]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+</mule>

@@ -1,0 +1,37 @@
+---
+description: Enforces global configuration element standards for Mule XML files during code reviews
+globs: **/src/main/mule/**/*.xml
+alwaysApply: false
+---
+
+# Mule Global Configuration Standards
+
+## All Global Config in One File
+- All global configuration elements **must** be defined in `src/main/mule/common/global-config.xml` (or `global.xml`)
+- This includes HTTP listeners, ObjectStore references, connector configs, APIKit config, error handler refs, etc.
+- **No configuration elements** should exist in implementation flow files
+
+## Configuration Element Naming
+- Format: `{description}_{type}` with description parts separated by hyphens
+- Examples:
+  - `customer-sapi_httpListenerConfig`
+  - `env_propertiesConfig`
+  - `oauth_objectStore`
+- Exception: Global Property elements use the variable name (e.g., `mule.env`)
+- Library-defined elements are prefixed with the library name (e.g., `common-selfsigned_tlsContext`)
+- When both `name` and `doc:name` exist, set them to the **same value**
+
+## No Hard-Coded Values
+- All values that change per environment **must** be parameterized via properties:
+  - HTTP listener host, port, protocol
+  - API autodiscovery ID and base path
+  - Environment name and encryption key
+  - Backend connector host/port
+  - Retry counts and timeout settings
+- Flag any literal host, port, URL, or credential in configuration elements
+
+## Review Checklist
+- [ ] No global config elements defined outside the global config file
+- [ ] Config element names follow `{description}_{type}` format
+- [ ] No hard-coded hosts, ports, URLs, or credentials in config elements
+- [ ] Properties are used for all environment-specific values

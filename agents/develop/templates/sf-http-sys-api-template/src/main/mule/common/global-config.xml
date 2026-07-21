@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:api-gateway="http://www.mulesoft.org/schema/mule/api-gateway"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:azure-key-vault-properties-provider="http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:salesforce-composite="http://www.mulesoft.org/schema/mule/salesforce-composite"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd
+		http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+		http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+		http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider/current/mule-azure-key-vault-properties-provider.xsd
+		http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+		http://www.mulesoft.org/schema/mule/salesforce-composite http://www.mulesoft.org/schema/mule/salesforce-composite/current/mule-salesforce-composite.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+		http://www.mulesoft.org/schema/mule/api-gateway http://www.mulesoft.org/schema/mule/api-gateway/current/mule-api-gateway.xsd">
+
+	<!-- =========================================================
+	     AZURE KEY VAULT — secure properties provider
+	     All secrets (Salesforce keys, logger encryption key) are
+	     fetched at runtime from Azure Key Vault.
+	     ========================================================= -->
+	<azure-key-vault-properties-provider:config
+		name="azure-key-vault-properties-provider_config"
+		doc:name="Azure Key Vault Properties Provider Config"
+		doc:id="11111111-aaaa-bbbb-cccc-000000000001" />
+
+	<!-- =========================================================
+	     PROPERTIES — environment-specific and common
+	     ========================================================= -->
+	<configuration-properties
+		doc:name="env-properties_config"
+		doc:id="22222222-aaaa-bbbb-cccc-000000000002"
+		file="properties/config-${mule.env}.properties" />
+	<configuration-properties
+		doc:name="common-properties_config"
+		doc:id="33333333-aaaa-bbbb-cccc-000000000003"
+		file="properties/config.properties" />
+
+	<!-- =========================================================
+	     GLOBAL ERROR HANDLER reference
+	     ========================================================= -->
+	<configuration
+		doc:name="global-error-handler_config"
+		doc:id="44444444-aaaa-bbbb-cccc-000000000004"
+		defaultErrorHandler-ref="global-error-handler" />
+
+	<!-- =========================================================
+	     HTTP LISTENER
+	     ========================================================= -->
+	<http:listener-config
+		name="global-http-listener_config"
+		doc:name="HTTP Listener config"
+		doc:id="55555555-aaaa-bbbb-cccc-000000000005">
+		<http:listener-connection
+			host="0.0.0.0"
+			port="${http.port}"
+			connectionIdleTimeout="${http.idleTimeout}"
+			readTimeout="${http.timeout}" />
+	</http:listener-config>
+
+	<!-- =========================================================
+	     APIKIT CONFIGURATION
+	     Update the RAML resource URI with the correct groupId,
+	     artifactId, and version once published to Exchange.
+	     ========================================================= -->
+	<apikit:config
+		name="sf-http-sys-api-template-spec-config"
+		doc:name="APIKit Config"
+		doc:id="66666666-aaaa-bbbb-cccc-000000000006"
+		api="resource::e0bc8c96-9dbd-48bc-915e-3e29577af6b3:sf-http-sys-api-template-spec:1.0.0:raml:zip:sf-http-sys-api-template-spec.raml"
+		outboundHeadersMapName="outboundHeaders"
+		httpStatusVarName="httpStatus" />
+
+	<!-- =========================================================
+	     API AUTODISCOVERY
+	     Update api.id per environment in config-{env}.properties.
+	     ========================================================= -->
+	<api-gateway:autodiscovery
+		apiId="${api.id}"
+		ignoreBasePath="true"
+		doc:name="api-autodiscovery_config"
+		doc:id="77777777-aaaa-bbbb-cccc-000000000007"
+		flowRef="sf-http-sys-api-template-main" />
+
+	<!-- =========================================================
+	     SALESFORCE STANDARD CONNECTOR — JWT authentication
+	     Used for: create, query, upsert, update, get-server-timestamp
+	     Properties: sfl.* from config-{env}.properties via AKV
+	     ========================================================= -->
+	<salesforce:sfdc-config
+		name="salesforce_config"
+		doc:name="Salesforce Config"
+		doc:id="88888888-aaaa-bbbb-cccc-000000000008">
+		<salesforce:jwt-connection
+			consumerKey="${sfl.consumerkey}"
+			storePassword="${sfl.storepassword}"
+			certificateAlias="${sfl.certalias}"
+			principal="${sfl.principal}"
+			tokenEndpoint="${sfl.tokenUrl}"
+			keyStore="${sfl.keystore}"
+			audienceUrl="${sfl.audienceUrl}"
+			objectTTLTimeout="${sfl.objectTtl}"
+			maxEntries="${sfl.maxEntries}">
+			<reconnection>
+				<reconnect frequency="${reconnection.frequency}" count="${reconnection.attempts}" />
+			</reconnection>
+		</salesforce:jwt-connection>
+	</salesforce:sfdc-config>
+
+	<!-- =========================================================
+	     SALESFORCE COMPOSITE CONNECTOR — JWT authentication
+	     Used for: execute-composite-request
+	     Properties: aspn.sfl.* — can point to a different SF org/user
+	     if needed; otherwise configure to use same org as sfl.*
+	     Remove this config if composite operations are not required.
+	     ========================================================= -->
+	<salesforce-composite:composite-config
+		name="salesforce-composite_config"
+		doc:name="Salesforce Composite Config"
+		doc:id="99999999-aaaa-bbbb-cccc-000000000009">
+		<salesforce-composite:oauth-jwt-connection
+			consumerKey="${aspn.sfl.consumerkey}"
+			keyStore="${aspn.sfl.keystore}"
+			storePassword="${aspn.sfl.storepassword}"
+			certificateAlias="${aspn.sfl.certalias}"
+			principal="${aspn.sfl.principal}"
+			tokenEndpoint="${aspn.sfl.tokenUrl}"
+			audienceUrl="${aspn.sfl.audienceUrl}"
+			responseTimeout="${sfl.responseTimeout}">
+			<reconnection>
+				<reconnect frequency="${reconnection.frequency}" count="${reconnection.attempts}" />
+			</reconnection>
+		</salesforce-composite:oauth-jwt-connection>
+	</salesforce-composite:composite-config>
+
+	<!-- =========================================================
+	     OBJECTSTORE — RecordType ID caching
+	     Caches Salesforce RecordType IDs to avoid repeated SOQL
+	     queries. TTL and expiration controlled via properties.
+	     ========================================================= -->
+	<os:object-store
+		name="Object-store_config"
+		doc:name="Object store"
+		doc:id="aaaaaaaa-aaaa-bbbb-cccc-000000000010"
+		expirationIntervalUnit="DAYS"
+		entryTtl="${os.objectTtl}"
+		entryTtlUnit="DAYS"
+		expirationInterval="${os.expirationInterval}" />
+
+	<!-- =========================================================
+	     CUSTOM LOGGER CONNECTOR
+	     encryptionKey sourced from AKV — never hardcoded.
+	     sensitiveKeyParts masks PII fields in logs.
+	     safeKeys allowlists non-sensitive correlation IDs.
+	     ========================================================= -->
+	<module-logger:config
+		name="custom-logger-connector_config"
+		doc:name="Custom Logger Connector Config"
+		doc:id="bbbbbbbb-aaaa-bbbb-cccc-000000000011"
+		encryptionKey="${logger.encryptionKey}"
+		sensitiveKeyParts="${logger.sensitiveFields}"
+		safeKeys="${logger.safeKeys}" />
+
+	<!-- =========================================================
+	     VALIDATION CONFIG
+	     ========================================================= -->
+	<validation:config
+		name="validation_config"
+		doc:name="Validation Config"
+		doc:id="cccccccc-aaaa-bbbb-cccc-000000000012" />
+
+</mule>

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd">
+
+	<!--
+	     GET RECORDS SUB-FLOW — GET /records
+
+	     Pattern  (mirrors fetch-provider-accounts.xml from sfl-crm-persona-sys-api):
+	       1. (Optional) validation:is-true — require at least one query param
+	       2. Build SOQL from query params → vars.queryPayload  (p-get-records-query.dwl)
+	       3. LOG BEFORE REQUEST — encrypted, BEFORE_SALESFORCE, body=vars.queryPayload.query
+	       4. execute-sf-query-flow
+	       5. LOG AFTER REQUEST  — encrypted, AFTER_SALESFORCE, body=payload
+	       6. Choice on !isEmpty(payload)
+	            when true  → map to API response array  (p-get-records-response.dwl)
+	            otherwise  → raise APP:RECORD_NOT_FOUND
+	-->
+	<sub-flow name="get-records-sub-flow" doc:id="11111111-bbbb-4444-cccc-dd0000000001">
+
+		<!-- Uncomment and adjust when at least one query parameter is required:
+		<validation:is-true
+			doc:name="Validate Required Query Params"
+			doc:id="22222222-bbbb-4444-cccc-dd0000000002"
+			config-ref="validation_config"
+			expression="#[!isEmpty(attributes.queryParams.id default '')]"
+			message="At least one of: id is required" />
+		-->
+
+		<ee:transform doc:name="Set Get Records Query" doc:id="33333333-bbbb-4444-cccc-dd0000000003">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable resource="dwls/p-get-records-query.dwl" variableName="queryPayload" />
+			</ee:variables>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG BEFORE REQUEST"
+			doc:id="44444444-bbbb-4444-cccc-dd0000000004"
+			config-ref="custom-logger-connector_config"
+			message="Executing SFDC query request for records"
+			tracepoint="BEFORE_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.queryPayload.query default ""]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<flow-ref
+			doc:name="execute-sf-query-flow"
+			doc:id="55555555-bbbb-4444-cccc-dd0000000005"
+			name="execute-sf-query-flow" />
+
+		<module-logger:build-log-with-encrypted-payload
+			doc:name="LOG AFTER REQUEST"
+			doc:id="66666666-bbbb-4444-cccc-dd0000000006"
+			config-ref="custom-logger-connector_config"
+			message="Response from SFDC query request for records"
+			tracepoint="AFTER_SALESFORCE"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- payload default []]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<choice doc:name="Check if Record(s) Found" doc:id="77777777-bbbb-4444-cccc-dd0000000007">
+			<when expression="#[!isEmpty(payload)]">
+				<ee:transform doc:name="DW Set Get Records Response" doc:id="88888888-bbbb-4444-cccc-dd0000000008">
+					<ee:message>
+						<ee:set-payload resource="dwls/p-get-records-response.dwl" />
+					</ee:message>
+				</ee:transform>
+			</when>
+			<otherwise>
+				<raise-error
+					doc:name="RAISE APP:RECORD_NOT_FOUND"
+					doc:id="99999999-bbbb-4444-cccc-dd0000000009"
+					type="APP:RECORD_NOT_FOUND"
+					description="No records found for the provided query parameters" />
+			</otherwise>
+		</choice>
+
+	</sub-flow>
+
+</mule>

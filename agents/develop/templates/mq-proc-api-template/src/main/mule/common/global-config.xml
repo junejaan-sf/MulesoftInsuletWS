@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+	xmlns:azure-key-vault-properties-provider="http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:api-gateway="http://www.mulesoft.org/schema/mule/api-gateway"
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+http://www.mulesoft.org/schema/mule/api-gateway http://www.mulesoft.org/schema/mule/api-gateway/current/mule-api-gateway.xsd
+http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider http://www.mulesoft.org/schema/mule/azure-key-vault-properties-provider/current/mule-azure-key-vault-properties-provider.xsd
+http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd
+http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!-- =============================================================
+	     Secrets Provider + Property Files
+	     ============================================================= -->
+	<azure-key-vault-properties-provider:config
+		name="azure-key-vault-properties-provider_config"
+		doc:name="Azure Key Vault Properties Provider Config" />
+
+	<configuration-properties doc:name="env-properties_config"
+		file="properties/config-${mule.env}.properties" />
+	<configuration-properties doc:name="common-properties_config"
+		file="properties/config.properties" />
+
+	<!-- Default error handler wired to all flows in this application -->
+	<configuration doc:name="global-error-handler_config"
+		defaultErrorHandler-ref="global-error-handler" />
+
+	<!-- =============================================================
+	     HTTP Listener Config — /ping and /health-check endpoints
+	     ============================================================= -->
+	<http:listener-config name="global-httpListener_config" doc:name="HTTP Listener config">
+		<http:listener-connection
+			host="${http.host}"
+			port="${http.port}"
+			readTimeout="${http.timeout}"
+			connectionIdleTimeout="${http.idleTimeout}" />
+	</http:listener-config>
+
+	<!-- =============================================================
+	     APIKit Config
+	     Update the resource URI once the RAML spec is published to Exchange.
+	     ============================================================= -->
+	<apikit:config name="mq-proc-api-template-spec-config"
+		api="resource::e0bc8c96-9dbd-48bc-915e-3e29577af6b3:mq-proc-api-template-spec:${api.raml.version}:raml:zip:mq-proc-api-template-spec.raml"
+		outboundHeadersMapName="outboundHeaders"
+		httpStatusVarName="httpStatus" />
+
+	<!-- =============================================================
+	     API Autodiscovery
+	     ============================================================= -->
+	<api-gateway:autodiscovery
+		apiId="${api.id}"
+		ignoreBasePath="true"
+		doc:name="api-autodiscovery_config"
+		flowRef="mq-proc-api-template-main" />
+
+	<!-- =============================================================
+	     Custom Logger Connector Config
+	     Encryption key and sensitive key definitions sourced from AKV / properties.
+	     ============================================================= -->
+	<module-logger:config name="custom-logger-connector_config"
+		doc:name="Custom Logger Connector Config"
+		encryptionKey="${logger.encryptionKey}"
+		sensitiveKeyParts="${logger.sensitiveFields}"
+		safeKeys="${logger.safeKeys}" />
+
+	<!-- =============================================================
+	     Anypoint MQ Config
+	     Credentials sourced from Azure Key Vault.
+	     ============================================================= -->
+	<anypoint-mq:config name="anypoint-mq_config" doc:name="Anypoint MQ Config">
+		<anypoint-mq:connection
+			url="${mq.url}"
+			clientId="${mq.app.clientId}"
+			clientSecret="${mq.app.clientSecret}">
+			<anypoint-mq:tcp-client-socket-properties connectionTimeout="${mq.connectionTimeout}" />
+		</anypoint-mq:connection>
+	</anypoint-mq:config>
+
+	<!-- =============================================================
+	     MQ Circuit Breaker Config (named — referenced on subscriber)
+	     onErrorTypes controls which errors trip the circuit.
+	     errorsThreshold = consecutive failures before circuit opens.
+	     tripTimeout = ms the circuit stays open before half-open retry.
+	     ============================================================= -->
+	<anypoint-mq:circuit-breaker name="mq_circuit_breaker_config"
+		doc:name="MQ Circuit Breaker Config"
+		onErrorTypes="${mq.subscriber.circuitBreakerErrors}"
+		errorsThreshold="${mq.subscriber.circuitBreaker.errorsThreshold}"
+		tripTimeout="${mq.subscriber.circuitBreaker.tripTimeout}" />
+
+	<!-- =============================================================
+	     Downstream Sys API HTTP Request Config
+	     Replace {downstream-sys-api} with the actual system API name.
+	     Add one block per downstream target system.
+	     ============================================================= -->
+	<http:request-config
+		name="{downstream-sys-api}_httpRequest_config"
+		doc:name="{downstream-sys-api}_httpRequestConfiguration"
+		basePath="${{downstream-sys-api}.basePath}"
+		responseTimeout="${request.timeout}">
+		<http:request-connection
+			host="${{downstream-sys-api}.host}"
+			port="${{downstream-sys-api}.port}"
+			connectionIdleTimeout="${request.idleTimeout}"
+			protocol="${{downstream-sys-api}.protocol}" />
+	</http:request-config>
+
+	<!-- =============================================================
+	     SFL CRM Persona Sys API HTTP Request Config
+	     Used by common-log-integration-error-details-sub-flow to log
+	     integration errors into Salesforce.
+	     ============================================================= -->
+	<http:request-config
+		name="sfl-crm-persona-sys-api_httpRequest_config"
+		doc:name="sfl-crm-persona-sys-api_httpRequestConfiguration"
+		basePath="${sfl-crm-persona-sys-api.basePath}"
+		responseTimeout="${request.timeout}">
+		<http:request-connection
+			host="${sfl-crm-persona-sys-api.host}"
+			port="${sfl-crm-persona-sys-api.port}"
+			connectionIdleTimeout="${request.idleTimeout}"
+			protocol="${sfl-crm-persona-sys-api.protocol}" />
+	</http:request-config>
+
+</mule>

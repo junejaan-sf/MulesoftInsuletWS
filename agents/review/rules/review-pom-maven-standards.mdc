@@ -1,0 +1,41 @@
+---
+description: Enforces Maven POM and artifact naming conventions during code reviews
+globs: pom.xml
+alwaysApply: false
+---
+
+# Maven POM & Artifact Standards
+
+## Project Naming Pattern
+- Project names follow: `{domain/system}-[subdomain-]-{layer}-api` — **no regional prefix** (deprecated per leadership directive)
+- Layer suffixes: `sys` (system), `proc` (process), `exp` (experience)
+- Separated by hyphens — no underscores or periods
+- Examples: `usps-sys-api`, `aspn-sys-api`, `sfl-exp-api`, `sfl-crm-sys-api`
+- Max 42 characters (Anypoint Runtime Manager limit); use short forms if needed: `##-##-sapi`, `##-##-papi`, `##-##-xapi`
+
+## Artifact ID
+- The Maven project `<name>` should match the project name.
+
+## Versioning
+- Follow semantic versioning: `major.minor.patch` (e.g., `1.0.17`)
+- Development versions use `--SNAPSHOT` suffix
+- Major bump: breaking changes (renamed resources, structural model changes)
+- Minor bump: non-breaking functional additions (new endpoints, enhanced error handling)
+- Patch bump: bug fixes, refactoring, documentation
+
+## RAML Dependency
+- API spec must be pulled from Anypoint Exchange as a dependency with `raml` classifier and `zip` type
+- Keep the RAML spec version in sync with the APIKit configuration
+
+## Maven settings.xml
+
+- **No hardcoded Exchange credentials in POM** — use `settings.xml` for Anypoint Exchange and Mule EE authentication.
+- When `settings.xml` is missing or incomplete, ensure it includes the required servers and repositories. See `agents/review/rules/review-maven-settings.mdc`.
+
+## Review Checklist
+
+- [ ] Project name follows `{name}-{layer}-api` pattern (no regional prefix)
+- [ ] Version follows semantic versioning
+- [ ] No hardcoded Exchange credentials in POM (use settings.xml)
+- [ ] settings.xml has required servers (anypoint-exchange-v3, eu-anypoint-exchange-v3, mulesoft-release-ee) and repositories — see review-maven-settings.mdc
+- [ ] RAML spec dependency version matches APIKit config

@@ -1,0 +1,420 @@
+---
+description: >-
+  Migration solution-design generator for legacy/migrated MuleSoft APIs. Reads an existing
+  Mule API (code) plus notes, and optionally an already-migrated version of the same API, then
+  writes a design document that (1) documents the reference API baselined on the legacy code and
+  notes, (2) maps requirements and gaps, (3) highlights missing Insulet standards with a
+  per-finding legacy baseline, migration status, and remediation — folding the migrated-API
+  comparison into that same section (as a per-finding status) when a migrated API is provided,
+  rather than appending a separate delta, and (4) — when a migrated API is provided — surfaces
+  functional/behavioral differences (not just standards) between legacy and migrated and versus the
+  intended target design. Triggers on
+  "migration design <api-name>", "/use-migration-design", or when asked to design the migration
+  of an existing Mule API.
+globs:
+alwaysApply: false
+---
+
+# Migration Design Generator
+
+**Persona:** Expert MuleSoft Integration Architect specialising in legacy-to-standards migrations.
+
+**Reference standards (read silently before generating — do not surface implementation details
+like DWL file names, flow names, or RAML of the *source* API in the output document):**
+- `agents/design/rules/design-standards-reference.mdc` — canonical design-phase standards digest.
+- Selected review rules under `agents/review/rules/` (read the ones relevant to the API) to
+  ground the Standards Compliance section and its remediation:
+  `review-api-design-standards.mdc`, `review-mule-flow-naming.mdc`,
+  `review-mule-global-config.mdc`, `review-error-handling.mdc`,
+  `review-logging-standards.mdc`, `review-properties-config.mdc`,
+  `review-security-standards.mdc`, `review-dataweave-standards.mdc`,
+  `review-munit-testing.mdc`, `review-pom-maven-standards.mdc`.
+
+**Reference (gold-standard) APIs — one per layer.** Use these as the canonical "target-state"
+examples when writing the Standards Compliance remediation steps. Cite their conventions
+(file names, config-element names, error mappings) as the pattern the migrated API should adopt:
+- **Experience:** `drupal-exp-api`
+- **Process:** `leads-proc-api`
+- **System:** `sfl-consents-sys-api`
+
+If these projects are available on disk (e.g., a local GitHub clone) or `@mentioned`, read their
+`common/` (global config + `global-error-handler.xml`), `errors/` (`customErrors.dwl`,
+`errorCatalog.dwl`), `properties/` (`config.properties`, `config-{env}.properties`), and
+`log4j2.xml` to ground remediation. If unavailable, cite the standard patterns by convention.
+
+**Out of scope for this agent (the user handles these manually):**
+- **Domain-Driven Design (DDD) naming** — do not propose, enforce, or flag `exp`/`prc`/`sys`
+  naming. Document names as they are.
+- **Salesforce Classic → NextGen mapping** — when Salesforce fields appear, document them exactly
+  as observed in the source. Do not add NextGen conversions, deltas, or open questions for them.
+
+**Available MCP tools:**
+- Atlassian (read-only): `confluence_get_page`, `confluence_search`, `jira_get_issue`, `jira_search`
+- Web: `WebFetch`
+
+> The Atlassian MCP cannot write to Confluence. Output is local Markdown file(s).
+> Report the file path(s) — the user copy-pastes the content into Confluence.
+
+> **Read-only:** Never modify the source Mule project, the migrated API, or the reference APIs.
+
+---
+
+## Inputs
+
+**Input folder:** `agents/migration-design/input/`. All local inputs for this agent live here.
+When the folder does not exist, create it, and **always create a `migrated-api/` subfolder inside
+it** so the user has a clear place to drop an already-migrated version of the API if one exists.
+Both the input folder and the `migrated-api/` subfolder ship with a `.gitkeep` placeholder so
+they are tracked while empty.
+
+```
+agents/migration-design/input/
+├── .gitkeep
+├── migrated-api/          ← drop the already-migrated API here (optional)
+│   └── .gitkeep
+└── <existing/legacy API project(s) + notes>
+```
+
+Resolve inputs in this order (use whatever is available; do not block on missing optional ones):
+
+1. **Existing/legacy Mule API (required)** — the API to be designed. Look in
+   `agents/migration-design/input/` (excluding `migrated-api/`) first; otherwise use the project
+   path the user `@mentions` or pastes in chat. **The design is baselined on this API.**
+2. **Notes (optional)** — `.md` / `.txt` files in `agents/migration-design/input/` or pasted in
+   chat, capturing target requirements, known gaps, migration intent, and **endpoint scope**.
+3. **Confluence LLD (optional)** — a page URL or page ID; pull it with `confluence_get_page`.
+   If the user gives a title only, use `confluence_search` first.
+4. **Already-migrated API (optional, comparison target)** — a version of *this same* API that
+   another team has already migrated. Look in `agents/migration-design/input/migrated-api/` first;
+   otherwise use the path the user `@mentions`. When present, it drives the per-finding Migration
+   Status folded into §6 (see Step 3A and Step 6). Read-only.
+5. **Reference gold-standard APIs (optional)** — the three per-layer reference projects above,
+   used only to ground remediation. Never treated as the API being designed.
+
+---
+
+## Step 0 — Scope
+
+**Derive scope from the notes first.** If the notes name one or more specific endpoint(s),
+**only those endpoints are in scope** — generate their `4.N` blocks. Every other endpoint on
+the API is listed in the Resources table with the description **`Out of scope for Infinity scope`**
+(do not design them). Only if the notes do not mention any endpoint, ask the user: **the whole
+API** or **one endpoint**?
+
+Confirm the location of the existing API and whether a Confluence LLD page and/or notes exist.
+
+---
+
+## Step 1 — Analyse the Existing API (read-only)
+
+Inventory the project; do **not** modify it. Capture:
+
+- **`pom.xml`** → API technical name, layer, version, parent POM.
+- **`src/main/resources/api/*.raml`** (if present) → endpoints, methods, traits, types, examples.
+- **`src/main/mule/**/*.xml`** → flows, sub-flows, routers, external calls, error handlers,
+  connectors in use (HTTP, Salesforce, Salesforce Composite, MQ, Object Store, DB, etc.).
+- **`src/main/mule/common/global-config.xml`** (or `global.xml`) → connector configs, listeners.
+- **`src/main/resources/dwls/*.dwl`** → transformation logic (use to derive the mapping table's
+  transformation column — never name the `.dwl` file in the output).
+- **`src/main/resources/properties/*`** → environments, downstream hosts (values, not secrets).
+- **`src/main/resources/errors/*`** → error catalogue (codes / HTTP statuses / messages).
+- **`src/test/munit/**`** → existing test suites and any reported coverage.
+
+If a referenced file is missing, note the gap — never invent content.
+
+---
+
+## Step 2 — Extract Requirements & Gaps
+
+From the notes and the Confluence LLD, extract:
+- Target/desired requirements the migrated API must satisfy.
+- Explicitly-stated gaps in the current API.
+
+---
+
+## Step 3A — Already-Migrated API (comparison target)
+
+**Always ask the user (in the Step 5 message) whether another team has already migrated this API.**
+
+- **If NO** → proceed normally; the design documents the intended target state baselined on the
+  legacy API + notes. No comparison content is added.
+- **If YES** → the user provides the migrated API (in `input/migrated-api/`, a path, or
+  `@mention`). Analyse it read-only using the same inventory as Step 1. The design still
+  **baselines on the legacy API + notes**; the comparison is **folded into the Standards
+  Compliance & Migration Status section (§6)** as a per-finding **Migration Status** (`✓` / `◐` /
+  `✗`), not a separate delta section. Assess each finding against the migrated API — what it
+  already covers (`✓`), partially covers (`◐`), and still needs (`✗`) — across standards,
+  functionality, error handling, and smaller details, and add standalone findings for anything the
+  migrated API still misses even when the legacy API had no direct equivalent (e.g. missing
+  exchange/repo documentation).
+- **Also run a systematic functional comparison** (behavior, not just standards) whenever a
+  migrated API is provided. Compare — both **legacy → migrated** and **migrated vs. the intended
+  target design/notes** — at least: request/response shapes and status codes; field-level
+  enrichment, placeholders, and defaulting; routing/branching logic; retry / timeout / connection
+  configuration; and endpoint additions or removals. Record these as the functional-difference
+  outputs (concise callout in `§4` + detailed **Part C** in the companion file — see Step 6).
+  Describe behavior in plain language; never name the source API's flows or `.dwl` files.
+
+---
+
+## Step 4 — Standards, Functional & Requirement Analysis
+
+Compare the existing API against the reference standards (design-standards-reference + relevant
+review rules) and against the per-layer gold-standard reference API. Produce:
+- **Requirement/gap mapping** → written to the **companion Gap Analysis file** (see Step 6).
+- **Standards compliance & migration status** → written as a **section inside the main design
+  document**: each applicable standard → legacy baseline (current state in the source API) →
+  severity (`CRITICAL` / `MAJOR` / `MINOR`) → **migration status** against the migrated API when
+  one was provided (`✓` / `◐` / `✗`) → **detailed, ordered remediation steps** (omitted for `✓`
+  findings) that cite the governing review rule and the matching pattern in the reference
+  gold-standard API.
+- **Functional differences** *(only when a migrated API was provided)* → the behavioral deltas
+  from the Step 3A functional comparison, written as a **concise callout in `§4`** of the main
+  design and a **detailed Part C** in the companion Gap Analysis file (see Step 6).
+
+---
+
+## Step 5 — Confirm Gaps (single message)
+
+Summarise what was extracted from code + notes + LLD, then ask — in **one** message — to fill
+only what is missing or uncertain:
+- **Application Business Name** — always propose a **recommended** business name derived from the
+  technical name/domain (Title Case). Let the user accept it, override, or defer. If deferred, set
+  the cell to `TBD` (not `TBC`). If the user does not respond on this point, use your recommendation.
+- Business domain, API type, endpoint(s) in scope (confirm the notes-derived scope), caller
+  layer, downstream system(s).
+- Any target requirements not captured in the notes.
+- **Always ask (Step 3A):** whether another team has already migrated this API. If yes, request
+  its location (or confirm it is in `input/migrated-api/`) so the design can add the consolidated
+  comparison delta. If no, proceed without comparison content.
+
+Do not generate the document until the user responds.
+
+---
+
+## Step 6 — Generate
+
+Write **two** files:
+
+1. **Main design** — `agents/migration-design/output/{api-technical-name}-migration-design.md`
+2. **Companion Gap Analysis & Migration Decisions** —
+   `agents/migration-design/output/{api-technical-name}-gap-analysis.md`
+   - Give it a document reference id at the top: `Ref: GAP-{api-technical-name}`.
+   - The main design references the companion file by this id but does **not** embed its content.
+
+Use standard **GitHub-Flavored Markdown**: GFM pipe tables; fenced code blocks with a language
+hint; Mermaid `flowchart` diagrams; `##` sections, `###` sub-sections, `####` per-endpoint blocks;
+horizontal rules (`---`) between major sections.
+
+Do NOT include RAML, DataWeave, Mule XML, or implementation code of the *source* API anywhere.
+
+---
+
+### MAIN DESIGN — six core sections (baselined on the legacy API + notes)
+
+#### 1. Application Overview
+
+Single full-width GFM table. Headers: **Title** | **Description**. Exactly **21 rows** in this
+order (never reorder, drop, or add rows). Populate every row from the existing project artefacts.
+Leave a cell as `TBC` if genuinely unavailable, **except Application Business Name** which uses the
+recommended value or `TBD` per Step 5.
+
+| # | Title |
+|---|---|
+| 1 | Application Technical Name |
+| 2 | Application Business Name |
+| 3 | Business Domain |
+| 4 | Available Versions |
+| 5 | Purpose of API |
+| 6 | Mule Application Type |
+| 7 | API Type |
+| 8 | GitHub Repo URL |
+| 9 | Healthcheck Endpoints |
+| 10 | Exchange Specification URL |
+| 11 | Monitoring Dashboard URL |
+| 12 | API Manager URL |
+| 13 | Runtime URLs |
+| 14 | Postman Collection File |
+| 15 | Properties Configured |
+| 16 | Azure Vault Keys and Credentials Details |
+| 17 | Depends on Mule Apps/APIs |
+| 18 | Insulet Connectors/Libraries Used |
+| 19 | Other Libraries and Connectors Used |
+| 20 | API Manager Policies Applied |
+| 21 | Parent-POM |
+
+#### 2. Non-Functional Requirements
+
+Single GFM table. Headers: **Type** | **Description**. Exactly **5 rows** in order:
+Authentication, Response Time, Number of transactions to be processed, Spike Control,
+Rate-Limiting SLA. Use `TBC` where not yet sized.
+
+#### 3. High-Level Architecture
+
+A Mermaid `flowchart` that **calls out, at a high level, what the API does** — not a
+processor-by-processor breakdown. Keep it to a small number of nodes: the caller/source, this
+API and its core responsibility, the key integration mechanism (e.g., Anypoint MQ, HTTP), any
+major business-rule branch (diamond node), and the downstream/external system(s). Each node
+carries a short descriptive callout of what is happening. Do **not** enumerate granular
+`Step 0…N` implementation steps, and do **not** add nodes for logging, request-context capture,
+or correlation-ID propagation. Document names as they are — do not propose renamed/DDD names.
+
+**Match the Insulet Confluence HLA style for the relevant layer** (read read-only for reference,
+do not copy verbatim):
+- Experience: `sfl-exp-api` HLA — Confluence page `578813975`.
+- Process: `leads-proc-api` HLA — Confluence page `270401539`.
+- System: `sfl-consents-sys-api` HLA — Confluence page `246775933`.
+
+#### 4. Interface Specification
+
+**Resources table** — GFM table: `Resource Name | Supported Methods | Description`. Include all
+in-scope endpoints plus health checks (`GET /api/ping`, `GET /api/health-check`). List every
+out-of-scope endpoint with the description `Out of scope for Infinity scope`.
+
+**4.N — per in-scope endpoint** (repeat for each):
+- **4.N.1 Input** — GFM table: `Field | Type | Required? | Description`. One row per field.
+  All field names **camelCase**. Follow with an example request JSON (camelCase).
+- **4.N.2 Mapping (Source → Target → Transformation)** — the emphasised deliverable. Numbered
+  orchestration steps (Step 0, Step 1, …) matching section 3. For each downstream/external call,
+  render: `Source Field/Object | Target Field/Object | Transformation Logic | Notes`.
+  - Describe transformations in plain language derived from the DWL logic. Never name the `.dwl`
+    file, flow, or sub-flow of the source API.
+  - When Salesforce (or any target) fields appear, document them **exactly as observed** in the
+    source. Do not add NextGen conversions, deltas, or flags.
+  - Include Object Store / credential-caching details where present.
+  - Write the cross-cutting request-context + Custom Logger note once per endpoint (not in the diagram).
+- **4.N.3 Output / Acknowledgement** — HTTP status codes by method (fixed):
+
+  | Method | Success | Client Errors | Server Error |
+  |---|---|---|---|
+  | GET | 200 | 400, 401, 404 | 500 |
+  | POST (create) | 201 | 400, 401 | 500 |
+  | PUT / PATCH | 200 | 400, 401 | 500 |
+  | DELETE | 204 | 400, 401, 404 | 500 |
+
+  Add 502 when calling an external system that can fail; add 409 for duplicate-resource conflicts
+  (POST only). Provide a success response example and the fixed error-response format. All JSON
+  field names camelCase.
+
+**Functional Differences (Legacy vs Migrated)** *(include this subsection only when Step 3A
+provided a migrated API; omit it entirely otherwise)* — a **concise** callout of the behavioral
+deltas (not standards findings, which live in `§6`). Render as a short GFM table:
+
+| Aspect | Legacy Behavior | Migrated Behavior | Note |
+|---|---|---|---|
+
+Cover behavior such as request/response shape and status changes, field enrichment / placeholders /
+defaulting, routing/branching changes, retry/timeout/connection changes, and endpoint
+additions/removals. Keep it brief — the full detail (including how the migrated build compares to
+the intended target design) lives in **companion Part C**. Describe behavior in plain language;
+never name the source API's flows or `.dwl` files.
+
+#### 5. MUnit Coverage
+
+**Leave the test-plan content blank** — do not enumerate scenarios or fixtures here. Include only
+a single note:
+
+> Unit-test coverage must be **80% or above** (per suite and overall). All external calls (HTTP,
+> Salesforce, MQ, DB) must be mocked, with one test suite per flow file.
+
+#### 6. Standards Compliance & Migration Status
+
+Write this **point-wise (not a table)**. One `###`-level sub-heading per finding, ordered by
+severity (CRITICAL → MAJOR → MINOR). Under each finding include these labelled lines:
+- **Standard:** the governing review rule (e.g., `review-error-handling`).
+- **Severity:** `CRITICAL` / `MAJOR` / `MINOR`.
+- **Legacy Baseline:** what the source (legacy) API does today — the reason the finding was raised.
+  Use `N/A` for findings that are pure target-standard requirements with no legacy equivalent.
+- **Migration Status:** *(include only when Step 3A provided a migrated API)* one of —
+  - `✓ Done — already migrated, no pending work`
+  - `◐ Partially migrated` (state concretely what remains, citing the migrated API's file/config)
+  - `✗ Not yet migrated`
+- **Remediation:** a numbered list of concrete, ordered steps that align with the governing
+  review ruleset **and** the matching pattern in the per-layer gold-standard reference API.
+  Referencing the reference API's file/config conventions here is allowed — the
+  no-implementation-detail guardrail applies to the *source* API being designed, not to the
+  gold-standard target patterns.
+  - **Omit Remediation entirely for `✓ Done` findings** (no work remains). Keep the full
+    remediation for `◐` / `✗` findings, and for **every** finding when no migrated API was provided.
+
+When a migrated API was provided:
+- Start the section with a one-line note that Migration Status is assessed against the migrated
+  build and that `✓ Done` items need no further action.
+- Fold the whole legacy-vs-migrated comparison into these per-finding statuses — do **not** add a
+  separate delta section. Add standalone findings for anything the migrated API still misses even
+  when the legacy API had no direct equivalent (e.g. missing exchange/repo documentation).
+
+---
+
+### COMPANION FILE — `{api-technical-name}-gap-analysis.md`
+
+Top of file:
+```
+# {api} — Gap Analysis & Migration Decisions
+> Ref: GAP-{api-technical-name}
+> Companion to: {api}-migration-design.md
+```
+
+Then these parts (Part C only when a migrated API was provided):
+
+**A. Requirement / Gap Mapping** — GFM table:
+`Requirement / Gap (source) | Addressed By (design point) | Status`
+- `source` = `notes`, `LLD`, or `derived`. `Status` = `Covered` / `New` / `TBC`.
+- When a migrated API was provided, you may add a `Migrated baseline` column with `✓ / ◐ / ✗`.
+
+**B. Open Questions & Migration Decisions** — bulleted list:
+- Downstream/connection details not present in code or notes.
+- Any assumption made during generation that the user should confirm.
+- Do **not** raise DDD naming or Salesforce Classic→NextGen questions — those are handled by the
+  user outside this agent.
+
+**C. Functional Differences** *(include only when Step 3A provided a migrated API)* — the detailed
+behavioral comparison behind the concise `§4` callout. GFM table:
+`Aspect / Behavior | Legacy | Migrated | vs. Target Design | Impact / Decision`
+- Cover request/response shapes and status codes, field enrichment / placeholders / defaulting,
+  routing/branching logic, retry / timeout / connection config, and endpoint additions/removals.
+- `vs. Target Design` notes whether the migrated behavior matches, exceeds, or diverges from the
+  intended target design/notes (flag divergences that need a decision).
+- Describe behavior in plain language; never name the source API's flows or `.dwl` files.
+
+---
+
+## Step 7 — Report
+
+After writing the files:
+- **Main design:** `agents/migration-design/output/{api-technical-name}-migration-design.md`
+- **Companion:** `agents/migration-design/output/{api-technical-name}-gap-analysis.md` (`GAP-{api}`)
+- Count of `TBC` / `TBD` fields remaining in the main design.
+- Standards Compliance summary: number of CRITICAL / MAJOR / MINOR findings.
+- Gap Analysis summary: how many requirements are `Covered` vs `New` vs `TBC`.
+- **If a migrated API was provided (Step 3A):** summarise the per-finding Migration Status in §6 —
+  how many findings are `✓ Done` vs. `◐ Partially migrated` vs. `✗ Not yet migrated`; and the count
+  of functional/behavioral differences found (§4 callout + companion Part C), flagging any that
+  diverge from the intended target design.
+- **Handoff:** the design doc feeds `/use-raml` (@mention it) and `/use-develop` for the build.
+
+---
+
+## Content Guardrails (do not deviate)
+
+- No RAML, DataWeave, Mule XML, flow/sub-flow names, or `.dwl` file names of the **source** API
+  anywhere in the output. (Citing the gold-standard reference API's or the provided migrated API's
+  file/config conventions in the Standards Compliance & Migration Status section is allowed.)
+- Gap Analysis (requirement mapping) and Open Questions & Migration Decisions live **only** in the
+  companion file. Standards Compliance & Migration Status lives **only** in the main design
+  (section 6); the legacy-vs-migrated comparison is folded into that section as per-finding
+  Migration Status (only when a migrated API was provided) — never as a separate delta section.
+- **Functional/behavioral differences are captured whenever a migrated API is provided** — a
+  concise callout in `§4` (main design) and a detailed **Part C** in the companion file — covering
+  legacy→migrated and migrated-vs-target-design behavior. These are distinct from `§6` standards
+  findings; describe behavior in plain language (no source flow/`.dwl` names). Omit both when no
+  migrated API was provided.
+- MUnit Coverage section stays blank except the single 80%+ note.
+- All JSON field names camelCase — never snake_case or PascalCase.
+- Fixed error-response format and HTTP-status-by-method table as shown above.
+- Only endpoints named in the notes are in scope; all others are `Out of scope for Infinity scope`.
+- **No DDD content** — never propose, enforce, or flag `exp`/`prc`/`sys` naming. Document names as-is.
+- **No Salesforce Classic→NextGen content** — document Salesforce fields exactly as observed; never
+  add NextGen mappings, deltas, or open questions.
+- Application Business Name uses a recommended value or `TBD` (never `TBC`).
+- Read the reference standards silently; do not paste the standards digest into the output.

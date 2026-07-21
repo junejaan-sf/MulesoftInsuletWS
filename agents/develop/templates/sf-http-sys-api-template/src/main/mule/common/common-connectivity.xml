@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:salesforce-composite="http://www.mulesoft.org/schema/mule/salesforce-composite"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd
+		http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+		http://www.mulesoft.org/schema/mule/salesforce-composite http://www.mulesoft.org/schema/mule/salesforce-composite/current/mule-salesforce-composite.xsd">
+
+	<!-- =========================================================
+	     REUSABLE SF EXECUTION FLOWS
+	     All five flows follow the same pattern:
+	       until-successful (retry on transient SFDC errors)
+	         try
+	           SF operation
+	           FV Set Success = true, Error = null
+	           error-handler
+	             on-error-propagate (transient) → FV success=false
+	             on-error-continue (non-transient) → FV success=false
+	       check-for-raise-error-sub-flow
+	       error-handler → on-error-propagate → LOG ERROR (EXCEPTION)
+
+	     Callers set vars.targetApiParams / vars.queryPayload /
+	     vars.upsertRequestDetails / vars.updateRequestDetails
+	     before calling the appropriate flow via flow-ref.
+	     ========================================================= -->
+
+	<!-- =========================================================
+	     SALESFORCE CREATE
+	     Input:  vars.targetApiParams.sfObject (sObject API name)
+	             payload (List of Map — field/value pairs)
+	     Output: payload (List of SaveResult)
+	     ========================================================= -->
+	<flow name="execute-sf-create-flow" doc:id="77777777-bbbb-cccc-dddd-000000000022">
+		<until-successful maxRetries="${retry.attempts}" doc:name="Retry" doc:id="88888888-bbbb-cccc-dddd-000000000023" millisBetweenRetries="${retry.interval}">
+			<try doc:name="Try" doc:id="99999999-bbbb-cccc-dddd-000000000024">
+				<salesforce:create
+					type="#[vars.targetApiParams.sfObject]"
+					doc:name="Execute SF Create"
+					doc:id="aaaaaaaa-bbbb-cccc-dddd-000000000025"
+					config-ref="salesforce_config" />
+				<ee:transform doc:name="FV Set Success = true, Error = null" doc:id="bbbbbbbb-bbbb-cccc-dddd-000000000026">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="cccccccc-bbbb-cccc-dddd-000000000027" type="${sfdcTransientErrors}">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="dddddddd-bbbb-cccc-dddd-000000000028">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="eeeeeeee-bbbb-cccc-dddd-000000000029">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="ffffffff-bbbb-cccc-dddd-000000000030">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+		<flow-ref doc:name="Refer to check-for-raise-error-sub-flow" doc:id="11111111-cccc-dddd-eeee-000000000031" name="check-for-raise-error-sub-flow" />
+		<error-handler>
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="22222222-cccc-dddd-eeee-000000000032">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					doc:id="33333333-cccc-dddd-eeee-000000000033"
+					config-ref="custom-logger-connector_config"
+					message="Error executing SF create request"
+					logLevel="INFO"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					errorType='#[((vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN"))]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+	<!-- =========================================================
+	     SALESFORCE QUERY
+	     Input:  vars.queryPayload.query (SOQL string)
+	     Output: payload (Iterator of Map — query result rows)
+	     ========================================================= -->
+	<flow name="execute-sf-query-flow" doc:id="44444444-cccc-dddd-eeee-000000000034">
+		<until-successful maxRetries="${retry.attempts}" doc:name="Retry" doc:id="55555555-cccc-dddd-eeee-000000000035" millisBetweenRetries="${retry.interval}">
+			<try doc:name="Try" doc:id="66666666-cccc-dddd-eeee-000000000036">
+				<salesforce:query doc:name="Execute SF Query" doc:id="77777777-cccc-dddd-eeee-000000000037" config-ref="salesforce_config">
+					<salesforce:salesforce-query><![CDATA[#[vars.queryPayload.query]]]></salesforce:salesforce-query>
+				</salesforce:query>
+				<ee:transform doc:name="FV Set Success = true, Error = null" doc:id="88888888-cccc-dddd-eeee-000000000038">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="99999999-cccc-dddd-eeee-000000000039" type="${sfdcTransientErrors}">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="aaaaaaaa-cccc-dddd-eeee-000000000040">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="bbbbbbbb-cccc-dddd-eeee-000000000041">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="cccccccc-cccc-dddd-eeee-000000000042">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+		<flow-ref doc:name="Refer to check-for-raise-error-sub-flow" doc:id="dddddddd-cccc-dddd-eeee-000000000043" name="check-for-raise-error-sub-flow" />
+		<error-handler>
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="eeeeeeee-cccc-dddd-eeee-000000000044">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					doc:id="ffffffff-cccc-dddd-eeee-000000000045"
+					config-ref="custom-logger-connector_config"
+					message="Error executing SF query request"
+					logLevel="INFO"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					errorType='#[((vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN"))]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+	<!-- =========================================================
+	     SALESFORCE UPSERT
+	     Input:  vars.upsertRequestDetails.sobjectName (sObject API name)
+	             vars.upsertRequestDetails.externalId  (external ID field name)
+	             payload (List of Map — field/value pairs)
+	     Output: payload (List of UpsertResult)
+	     ========================================================= -->
+	<flow name="execute-sf-upsert-flow" doc:id="11111111-dddd-eeee-ffff-000000000046">
+		<until-successful maxRetries="${retry.attempts}" doc:name="Retry" doc:id="22222222-dddd-eeee-ffff-000000000047" millisBetweenRetries="${retry.interval}">
+			<try doc:name="Try" doc:id="33333333-dddd-eeee-ffff-000000000048">
+				<salesforce:upsert
+					doc:name="Execute SF Upsert"
+					doc:id="44444444-dddd-eeee-ffff-000000000049"
+					config-ref="salesforce_config"
+					objectType="#[vars.upsertRequestDetails.sobjectName]"
+					externalIdFieldName="#[vars.upsertRequestDetails.externalId]" />
+				<ee:transform doc:name="FV Set Success = true, Error = null" doc:id="55555555-dddd-eeee-ffff-000000000050">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="66666666-dddd-eeee-ffff-000000000051" type="${sfdcTransientErrors}">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="77777777-dddd-eeee-ffff-000000000052">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="88888888-dddd-eeee-ffff-000000000053">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="99999999-dddd-eeee-ffff-000000000054">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+		<flow-ref doc:name="Refer to check-for-raise-error-sub-flow" doc:id="aaaaaaaa-dddd-eeee-ffff-000000000055" name="check-for-raise-error-sub-flow" />
+		<error-handler>
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="bbbbbbbb-dddd-eeee-ffff-000000000056">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					doc:id="cccccccc-dddd-eeee-ffff-000000000057"
+					config-ref="custom-logger-connector_config"
+					message="Error executing SF upsert request"
+					logLevel="INFO"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					errorType='#[((vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN"))]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+	<!-- =========================================================
+	     SALESFORCE UPDATE
+	     Input:  vars.updateRequestDetails.sobjectName (sObject API name)
+	             payload (List of Map — must include Id + fields to update)
+	     Output: payload (List of SaveResult)
+	     ========================================================= -->
+	<flow name="execute-sf-update-flow" doc:id="dddddddd-dddd-eeee-ffff-000000000058">
+		<until-successful maxRetries="${retry.attempts}" doc:name="Retry" doc:id="eeeeeeee-dddd-eeee-ffff-000000000059" millisBetweenRetries="${retry.interval}">
+			<try doc:name="Try" doc:id="ffffffff-dddd-eeee-ffff-000000000060">
+				<salesforce:update
+					doc:name="Execute SF Update"
+					doc:id="11111111-eeee-ffff-aaaa-000000000061"
+					config-ref="salesforce_config"
+					type="#[vars.updateRequestDetails.sobjectName]" />
+				<ee:transform doc:name="FV Set Success = true, Error = null" doc:id="22222222-eeee-ffff-aaaa-000000000062">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="33333333-eeee-ffff-aaaa-000000000063" type="${sfdcTransientErrors}">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="44444444-eeee-ffff-aaaa-000000000064">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="55555555-eeee-ffff-aaaa-000000000065">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="66666666-eeee-ffff-aaaa-000000000066">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+		<flow-ref doc:name="Refer to check-for-raise-error-sub-flow" doc:id="77777777-eeee-ffff-aaaa-000000000067" name="check-for-raise-error-sub-flow" />
+		<error-handler>
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="88888888-eeee-ffff-aaaa-000000000068">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					doc:id="99999999-eeee-ffff-aaaa-000000000069"
+					config-ref="custom-logger-connector_config"
+					message="Error executing SF update request"
+					logLevel="INFO"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					errorType='#[((vars.errorDetails.errorType.namespace default "UNKNOWN") ++ ":" ++ (vars.errorDetails.errorType.identifier default "UNKNOWN"))]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+	<!-- =========================================================
+	     SALESFORCE COMPOSITE REQUEST
+	     Input:  payload (CompositeRequest object — allOrNone + compositeRequest[])
+	             uses salesforce-composite_config (may be a different SF user/org)
+	     Output: payload (CompositeResponse with compositeResponse[])
+	     Remove this flow if composite operations are not required.
+	     ========================================================= -->
+	<flow name="execute-sf-composite-flow" doc:id="aaaaaaaa-eeee-ffff-aaaa-000000000070">
+		<until-successful maxRetries="${retry.attempts}" doc:name="Retry" doc:id="bbbbbbbb-eeee-ffff-aaaa-000000000071" millisBetweenRetries="${retry.interval}">
+			<try doc:name="Try" doc:id="cccccccc-eeee-ffff-aaaa-000000000072">
+				<salesforce-composite:execute-composite-request
+					doc:name="Execute Composite Request"
+					doc:id="dddddddd-eeee-ffff-aaaa-000000000073"
+					config-ref="salesforce-composite_config" />
+				<ee:transform doc:name="FV Set Success = true, Error = null" doc:id="eeeeeeee-eeee-ffff-aaaa-000000000074">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="success"><![CDATA[true]]></ee:set-variable>
+						<ee:set-variable variableName="errorDetails"><![CDATA[null]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+				<error-handler>
+					<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="ffffffff-eeee-ffff-aaaa-000000000075" type="${sfdcTransientErrors}">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="11111111-ffff-aaaa-bbbb-000000000076">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-propagate>
+					<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="22222222-ffff-aaaa-bbbb-000000000077">
+						<ee:transform doc:name="FV Set Success = false, Error Details" doc:id="33333333-ffff-aaaa-bbbb-000000000078">
+							<ee:message />
+							<ee:variables>
+								<ee:set-variable variableName="success"><![CDATA[false]]></ee:set-variable>
+								<ee:set-variable variableName="errorDetails"><![CDATA[%dw 2.0
+output application/java
+---
+error]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					</on-error-continue>
+				</error-handler>
+			</try>
+		</until-successful>
+		<flow-ref doc:name="Refer to check-for-raise-error-sub-flow" doc:id="44444444-ffff-aaaa-bbbb-000000000079" name="check-for-raise-error-sub-flow" />
+		<error-handler>
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="55555555-ffff-aaaa-bbbb-000000000080">
+				<module-logger:build-error-log-without-payload
+					doc:name="LOG ERROR"
+					doc:id="66666666-ffff-aaaa-bbbb-000000000081"
+					config-ref="custom-logger-connector_config"
+					message="Error executing SF composite request"
+					logLevel="INFO"
+					tracepoint="EXCEPTION"
+					sourceSystem="#[vars.requestContext.sourceSystem]"
+					targetSystem="#[vars.requestContext.targetSystem]"
+					errorType='#[vars.errorDetails.errorType.identifier default "UNKNOWN"]'
+					errorDescription='#[vars.errorDetails.description default "Unhandled error"]'
+					cause='#[vars.errorDetails.cause.message default ""]'
+					errorCode="#[vars.errorDetails.cause.errorMessage.attributes.statusCode default 500]" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+
+</mule>

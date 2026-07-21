@@ -1,0 +1,538 @@
+---
+description: Comprehensive Postman v2.1 collection generation guidelines for MuleSoft APIs — combines RAML spec, MUnit fixtures, and live deployed CloudHub URL via the MuleSoft MCP, with strict secret-scrubbing
+globs: ["**/*.postman_collection.json"]
+alwaysApply: false
+---
+
+# Postman Collection Implementation Guidelines for MuleSoft APIs
+
+You are a MuleSoft API integration engineer. You must adhere to these rules when generating any `.postman_collection.json` file so that the collection is consistent, secure, and runnable across environments.
+
+## 1. Overview
+
+This guide describes how to assemble a Postman v2.1 collection from three sources:
+
+1. **RAML spec** — endpoint paths, HTTP methods, parameters, declared response codes, security scheme, examples
+2. **MUnit test suites + fixtures** — actual request payloads, headers, query/uri params, expected response payloads, asserted status codes
+3. **MuleSoft MCP `list_applications`** — live CloudHub `fullDomain` per environment (with fallbacks)
+
+The result is a single file with per-environment folders, happy-path and negative requests, and Postman variables for secrets — no credentials are ever baked into the output.
+
+## 2. Pattern Alignment
+
+This rule mirrors the established `intent-gen-*.mdc` + `gen-*-implementation.mdc` pair pattern used for RAML, Mule, and MUnit (see `intent-gen-raml.mdc`, `gen-raml-implementation.mdc`, `intent-gen-munit.mdc`, `gen-munit-implementation.mdc`). The intent file routes; this file is the substantive specification.
+
+## 3. Mandatory Pre-Generation Consultation (STOP & ASK)
+
+Before generating any JSON, creating folders, or resolving URLs, you **must** pause and ask the user for the following information in **one combined question batch**. Do not proceed with default assumptions.
+
+Use the `AskQuestion` tool with these questions:
+
+- **API / project name** (e.g., `sfmc-consents-sys-api`) — used to look up the deployed app via MCP and to name the output file.
+- **Environments to include** — multi-select from `local`, `DEV`, `QA`, `UAT`, `PROD`. Drives folder structure and per-env URL lookups. No MCP-side env-list tool exists, so this is user-supplied.
+- **RAML spec location** — only ask if not auto-discovered under `agents/raml/examples/{api-name}-spec/` or `src/main/resources/api/`.
+- **Inputs source** — pick one or both:
+  - User-provided sample payloads (paste request JSON for happy path + each negative case).
+  - "Derive from MUnit" — extract payloads automatically per §6.
+- **Negative scenarios to include** — checklist limited to **`400`, `401`, `404`, and `500`** ONLY. No other status codes (no `403`, `409`, `422`, `502`, `503`, `504`, timeouts) are emitted, ever. The checklist is **per-API and per-use-case**: only offer the codes that are actually evidenced by MUnit tests or RAML responses for that specific endpoint — do not blanket-apply all four to every endpoint. If an endpoint has no negative MUnit case for a given code, that scenario is skipped for that endpoint.
+- **`sourceSystem` / `targetSystem` header values** — or "read from MUnit attributes".
+
+### Source-of-Truth Fallback
+
+When the user provides a source of truth (Confluence link, requirements doc, sibling rule):
+
+- **Use explicit guidance** — if the source explicitly answers any of the above, follow it without asking again.
+- **Ask when silent** — if the source is silent on a required answer, you **must** ask before proceeding.
+
+## 4. Inputs the Rule Consumes
+
+| Source | What we extract | Where |
+|---|---|---|
+| RAML root | endpoint paths, HTTP methods, uri/query params, declared response codes, security scheme | resolved via §4.1 lookup chain |
+| RAML examples | seed request/response bodies | `examples/*.raml`, inline `example:` blocks (under the resolved RAML root) |
+| MUnit suites | success/error case names, mocked status codes, headers/queryParams/uriParams | `src/test/munit/*-test-suite.xml` `<munit:set-event>` |
+| MUnit fixtures (request) | actual request JSON bodies | `src/test/resources/testdata/{suite}/business-inbound/*-request.json` |
+| MUnit fixtures (response) | expected response bodies for Postman `response[]` documentation array | `src/test/resources/testdata/{suite}/business-outbound/*-response.json` |
+| Source flow XML | detect non-HTTP message sources for the §6 pre-filter | `src/main/mule/*.xml` |
+| Project POM | discover the `{api-name}-spec` artifact coordinates (groupId, artifactId, version) | `pom.xml` `<dependencyManagement>`, `<dependencies>` |
+| MuleSoft MCP `search_asset` | locate the API spec asset in Anypoint Exchange | runtime |
+| MuleSoft MCP `list_applications` | live CloudHub `fullDomain` per env | runtime |
+| MuleSoft MCP `list_api_instances` (fallback) | API Manager `consumerEndpoint` if app is fronted by API Manager | runtime |
+| Local Maven cache | RAML artifact unpacked or as `*.zip` | `~/.m2/repository/{groupId-path}/{api-name}-spec/{version}/` |
+
+### 4.1 RAML Spec Lookup Chain (CRITICAL)
+
+The agent must resolve the canonical RAML root by walking this chain in order. **Stop at the first hit.** Record which tier resolved it and surface it in a chat note (e.g., `"Resolved RAML from local Maven cache: ~/.m2/repository/.../sfmc-consents-sys-api-spec/1.0.5/"`).
+
+#### Tier 1 — POM Dependency Management
+
+Read `pom.xml` (project root) and its `<parent>` POM if present. Look in `<dependencyManagement>` and `<dependencies>` for an artifact whose `<artifactId>` matches `{api-name}-spec` (often with `<classifier>raml</classifier>` or `<type>raml-fragment</type>`/`<type>zip</type>`).
+
+Capture:
+- `groupId` (e.g., `com.insulet`)
+- `artifactId` (e.g., `sfmc-consents-sys-api-spec`)
+- `version` (e.g., `1.0.5`)
+- `classifier` / `type` if present
+
+This determines the artifact path used in Tier 3.
+
+#### Tier 2 — Anypoint Exchange (via MCP)
+
+Call the MuleSoft MCP to search Exchange:
+
+```
+CallMcpTool: search_asset
+  server: user-mulesoft
+  arguments:
+    searchQuery: "{api-name}-spec"
+    assetFilters: ["rest-api"]
+    statuses: ["published"]
+    maxResults: 5
+```
+
+Match an asset whose `assetId` (or `name`) equals `{api-name}-spec` and whose `groupId` matches the value from Tier 1 (if Tier 1 succeeded). If found, this is the canonical published source — note the version pinned in Exchange and prefer the same version as the POM (Tier 1) when available.
+
+If the agent only has Exchange metadata (asset id + version) but no local file, it must still proceed to Tier 3 to materialize the bytes from the local Maven cache (Exchange artifacts are downloaded into `~/.m2` when Maven resolves them).
+
+#### Tier 3 — Local Maven Cache
+
+Compute the cache path:
+
+```
+~/.m2/repository/{groupId-with-slashes}/{api-name}-spec/{version}/
+```
+
+For example, `groupId=com.insulet.api`, `artifactId=sfmc-consents-sys-api-spec`, `version=1.0.5` resolves to:
+
+```
+/Users/sbajpayee/.m2/repository/com/insulet/api/sfmc-consents-sys-api-spec/1.0.5/
+```
+
+Look for, in order:
+
+1. An unpacked directory containing `{api-name}-spec.raml` at its root.
+2. A `*.zip` artifact (e.g., `sfmc-consents-sys-api-spec-1.0.5-raml.zip` or `...-raml-fragment.zip`). If only the zip exists, unzip it to a temp directory and use the unpacked RAML root.
+3. A `*-raml.zip` or `*.jar` containing RAML resources under `/api/` or at the root.
+
+If the version is unknown (Tier 1 missed), list the directory and pick the highest semantic version available locally.
+
+#### Tier 4 — Workspace RAML Examples Folder
+
+Check `agents/raml/examples/{api-name}-spec/`. Look for the root RAML file `{api-name}-spec.raml` or any `*.raml` matching the pattern.
+
+#### Tier 5 — In-Project Fallback
+
+Check `src/main/resources/api/` for a root RAML. This is the legacy in-project location.
+
+#### Tier 6 — ASK the User
+
+If all five tiers miss, ASK the user via `AskQuestion` to provide:
+- The path to the RAML root file, OR
+- The Exchange asset id + version (and the agent will retry Tier 3 with the supplied coordinates).
+
+If the user skips, abort generation with a clear chat error — the rule cannot proceed without a RAML spec.
+
+#### Lookup Chain Diagram
+
+```mermaid
+flowchart TD
+    Start[Need RAML spec] --> T1["Tier 1: pom.xml<br/>find {api-name}-spec dependency"]
+    T1 --> T1Hit{Coords found?}
+    T1Hit -->|Yes| T2["Tier 2: MCP search_asset<br/>searchQuery={api-name}-spec"]
+    T1Hit -->|No| T2Direct["Tier 2: MCP search_asset<br/>(no version pin)"]
+    T2 --> T2Hit{Exchange asset found?}
+    T2Direct --> T2Hit
+    T2Hit -->|Yes, has local copy| Use[Use resolved RAML]
+    T2Hit -->|Yes, no local copy| T3
+    T2Hit -->|No| T3["Tier 3: ~/.m2/repository/<br/>{groupId}/{api-name}-spec/{version}/"]
+    T3 --> T3Hit{Cache hit?}
+    T3Hit -->|Yes, unpacked| Use
+    T3Hit -->|Yes, zip only| Unzip[Unzip to temp dir]
+    Unzip --> Use
+    T3Hit -->|No| T4["agents/raml/examples/<br/>{api-name}-spec/"]
+    T4 --> T4Hit{Found?}
+    T4Hit -->|Yes| Use
+    T4Hit -->|No| T5["src/main/resources/api/"]
+    T5 --> T5Hit{Found?}
+    T5Hit -->|Yes| Use
+    T5Hit -->|No| Ask[Tier 6: AskQuestion for path]
+    Ask --> AskHit{User provided?}
+    AskHit -->|Yes| Use
+    AskHit -->|No| Abort[Abort with chat error]
+    Use --> Note["Chat note: 'Resolved RAML from <tier> at <path>'"]
+```
+
+## 5. MuleSoft MCP URL Resolution Algorithm
+
+For each environment the user selected, resolve the public base URL using a strict **three-tier fallback**: MCP → ASK user → placeholder. Never silently fail.
+
+### 5.1 Tier 1 — MCP
+
+Call `list_applications` first (the canonical CloudHub source):
+
+```
+CallMcpTool: list_applications
+  server: user-mulesoft
+  arguments:
+    environmentName: <ENV>     // e.g., "DEV"
+    appName: <api-name>        // e.g., "sfmc-consents-sys-api"
+```
+
+Defensively read the response — the MCP tool descriptors document only inputs, so access fields with optional chaining and try multiple shapes:
+
+```
+fullDomain =
+     application?.fullDomain
+  || target?.deploymentSettings?.http?.inbound?.publicUrl
+  || data?.[0]?.fullDomain
+  || data?.[0]?.application?.fullDomain
+```
+
+If `fullDomain` resolves, the base URL is `https://{fullDomain}` (CloudHub default scheme).
+
+If `list_applications` returned nothing or no domain field could be extracted, fall back to:
+
+```
+CallMcpTool: list_api_instances
+  server: user-mulesoft
+  arguments:
+    environmentName: <ENV>
+```
+
+Match an instance whose `assetId` / `instanceLabel` / `name` corresponds to the API and read `consumerEndpoint` (or equivalent URL field).
+
+### 5.2 Tier 2 — ASK user
+
+If MCP resolution fails for any env, you **must** ask the user (do not silently move to a placeholder). Use `AskQuestion` with one prompt per unresolved env, batched into a single question form. Example prompt:
+
+> "MCP could not resolve a public URL for `QA`. Paste the base URL (e.g., `https://my-api-qa-xxxx.usa-e1.cloudhub.io`), or choose 'Skip' to use a TODO placeholder."
+
+### 5.3 Tier 3 — Placeholder (last resort)
+
+Only if the user skips or provides no value, set the collection variable to a literal placeholder:
+
+```
+{ "key": "base_url_<ENV>", "value": "TODO-set-base-url-for-<ENV>" }
+```
+
+Surface a single chat warning listing every env that fell through to placeholder, e.g., `"WARNING: base_url_QA and base_url_UAT were not resolved — set them in the Variables tab before running."`.
+
+### 5.4 Decision Diagram
+
+```mermaid
+flowchart TD
+    Start[For each selected env] --> Call1["list_applications<br/>environmentName=ENV<br/>appName=API"]
+    Call1 --> Found{Has fullDomain?}
+    Found -->|Yes| Extract["base_url_ENV<br/>= https://{fullDomain}"]
+    Found -->|No| Call2["list_api_instances<br/>environmentName=ENV"]
+    Call2 --> Match{Match by label/asset?}
+    Match -->|Yes| Extract2[Read consumerEndpoint]
+    Match -->|No| AskUser["AskQuestion: paste base URL<br/>for ENV (or skip)"]
+    AskUser --> Provided{User provided?}
+    Provided -->|Yes| UseUserUrl[Use user-supplied URL]
+    Provided -->|Skipped| Placeholder["base_url_ENV<br/>= 'TODO-set-base-url-for-ENV'"]
+    Extract --> Variable[Set collection variable]
+    Extract2 --> Variable
+    UseUserUrl --> Variable
+    Placeholder --> Variable
+```
+
+### 5.5 Notes
+
+- No `list_environments` tool exists in the MuleSoft MCP — env names are user-supplied constants from §3.
+- The `local` env always uses `http://0.0.0.0:8081` (or `http://localhost:8081`) — do **not** call MCP for it.
+
+## 6. MUnit Data Extraction Algorithm
+
+When the user picks "Derive from MUnit", follow this exact procedure.
+
+### 6.1 Step 1 — Glob suites
+
+Glob `src/test/munit/*-test-suite.xml`. Process each suite file in turn.
+
+### 6.2 Step 2 — Pre-filter non-HTTP-triggered flows (CRITICAL)
+
+Inspect the suite's `<munit:set-event>` attributes **and** look up the source flow it tests in `src/main/mule/*.xml`. If the flow's source is **not** an HTTP listener — i.e., it is `anypoint-mq:subscriber`, `scheduler`, `file:listener`, `jms:listener`, `vm:listener`, or any other event-driven source — **skip the entire suite**. These flows have no HTTP entry point and therefore no Postman equivalent.
+
+**Detection signals (from the `<munit:set-event>` attributes shape, per `gen-munit-implementation.mdc` §"Message Source Attribute Structures"):**
+
+| Attribute shape | Source | Action |
+|---|---|---|
+| `headers`, `queryParams`, `uriParams`, `requestPath`, `method` | `http:listener` | **Include** |
+| `properties.correlationId`, `messageId`, `contentType` | `anypoint-mq:subscriber` | **Skip** |
+| Bare payload only, no attributes | `scheduler` | **Skip** |
+| `path`, `filename`, `size`, `timestamp` | `file:listener` | **Skip** |
+| JMS / VM / custom message attributes | `jms:listener`, `vm:listener`, etc. | **Skip** |
+
+**Cross-check:** open the source flow XML referenced by the suite (usually `<flow-ref>` to `{api}-main` or a named flow) and confirm the source element. If you find `<anypoint-mq:subscriber>`, `<scheduler>`, `<file:listener>`, `<jms:listener>`, `<vm:listener>`, etc., skip the suite.
+
+**Reporting:** emit a single chat note after processing all suites listing every skipped suite and the reason, e.g.:
+
+```
+Skipped non-HTTP suites:
+- order-mq-consumer-test-suite.xml — flow source is anypoint-mq:subscriber
+- nightly-batch-test-suite.xml — flow source is scheduler
+```
+
+### 6.3 Step 3 — Classify tests
+
+Parse each `<munit:test name="...">` in the surviving suites and classify by name pattern (per `gen-munit-implementation.mdc` §"File Naming Convention"):
+
+- `*-success*` / `*-positive*` / `*-happy*` → **happy-path bucket**
+- `*-error*` / `*-validation-error*` / `*-not-found*` / `*-unauthorized*` / `*-server-error*` / `*-bad-request*` → **negative bucket**
+
+Map the scenario keyword to an HTTP status using **this fixed allow-list table**. Codes outside this list are dropped:
+
+| Scenario keyword in test name | HTTP status emitted |
+|---|---|
+| `validation-error`, `bad-request`, `invalid` | `400` |
+| `unauthorized`, `auth-error`, `missing-credentials` | `401` |
+| `not-found`, `missing` | `404` |
+| `server-error`, `internal-error`, `unhandled-error` | `500` |
+| anything else (e.g., `forbidden`, `duplicate`, `unprocessable`, `conflict`, connectivity) | **DROP — do not emit** |
+
+### 6.4 Step 4 — Extract request shape from `<munit:set-event>`
+
+Inside `<munit:execution>` find the first `<munit:set-event>`. From `attributes` extract:
+
+- `headers` → seed Postman `request.header[]` (with secrets stripped per §8)
+- `queryParams` → seed `request.url.query[]`
+- `uriParams` → seed `request.url.variable[]`
+- `requestPath` + `method` → seed URL path and `request.method`
+
+### 6.5 Step 5 — Inline request body
+
+Resolve any `readUrl('classpath://testdata/{suite}/business-inbound/...json')` reference to the actual file under `src/test/resources/testdata/{suite}/business-inbound/`. Inline its content into `request.body.raw`.
+
+### 6.6 Step 6 — Populate the response example
+
+Locate `<munit-tools:assert-equals>` / `<munit-tools:assert-that>` referencing `attributes.statusCode` or expected response payloads. Use this to:
+
+- Set the response example name and `code` in the Postman `response[]` array.
+- Populate `response[*].body` from the matching `business-outbound/*-response.json`.
+
+### 6.7 Fallback chain
+
+If a fixture is missing for a given endpoint × scenario:
+
+1. Fall back to the RAML `examples/*.raml` for that endpoint.
+2. If no RAML example exists, ASK the user via `AskQuestion` to paste a sample payload.
+3. If the user skips, **do not emit a placeholder body** — drop the request and surface a chat note.
+
+### 6.8 Per-Endpoint, Per-Use-Case Tailoring
+
+Emitted negative scenarios must be derived **strictly from what exists** for each endpoint, never blanket-applied:
+
+- For each endpoint discovered in the RAML, build the negative set as the **intersection** of:
+  - (a) the four-code allow-list `{400, 401, 404, 500}`, and
+  - (b) the codes that have a corresponding MUnit test or RAML `responses:` entry for *that specific endpoint*.
+- If an endpoint has zero negative tests, **only the happy path is emitted** for it. Do not invent negatives.
+- If an endpoint has only `400` and `404` evidenced, only those two negative requests are emitted — `401` and `500` are skipped for that endpoint.
+
+### 6.9 Deduplication
+
+If multiple MUnit tests cover the same `endpoint × scenario`, emit **one** Postman request, not one per test. Choose the test whose fixture has the most complete payload (largest non-empty `business-inbound` JSON).
+
+## 7. Postman Collection Schema
+
+The output must be a Postman v2.1 collection. Use this skeleton (a tightened version of `agents/postman/examples/sfmc-consents-sys-api.postman_collection.json` if present):
+
+```json
+{
+  "info": {
+    "name": "{api-name}",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Auto-generated from RAML + MUnit. Set anypoint_client_id and anypoint_client_secret in the Variables tab before running."
+  },
+  "variable": [
+    { "key": "base_url_local", "value": "http://0.0.0.0:8081" },
+    { "key": "base_url_DEV",   "value": "<resolved-or-placeholder>" },
+    { "key": "base_url_QA",    "value": "<resolved-or-placeholder>" },
+    { "key": "base_url_UAT",   "value": "<resolved-or-placeholder>" },
+    { "key": "base_url_PROD",  "value": "<resolved-or-placeholder>" },
+    { "key": "anypoint_client_id",     "value": "", "type": "string" },
+    { "key": "anypoint_client_secret", "value": "", "type": "secret" },
+    { "key": "sourceSystem", "value": "<from-user>" },
+    { "key": "targetSystem", "value": "<from-user>" }
+  ],
+  "item": [
+    {
+      "name": "DEV",
+      "item": [
+        {
+          "name": "Happy Path",
+          "item": [
+            /* one request per endpoint, one per success status */
+          ]
+        },
+        {
+          "name": "Negative — 400 / 401 / 404 / 500 (only those evidenced per endpoint)",
+          "item": [
+            /* one request per (endpoint × negative scenario actually present in MUnit/RAML) */
+          ]
+        }
+      ]
+    }
+    /* additional env folders (QA, UAT, PROD, local) follow the same shape */
+  ]
+}
+```
+
+### 7.1 Per-Request Shape
+
+Every request emitted must conform to:
+
+```json
+{
+  "name": "{METHOD} {path} — {scenario}",
+  "request": {
+    "auth": { "type": "noauth" },
+    "method": "POST",
+    "header": [
+      { "key": "client_id",        "value": "{{anypoint_client_id}}",     "type": "text" },
+      { "key": "client_secret",    "value": "{{anypoint_client_secret}}", "type": "text" },
+      { "key": "x-correlation-id", "value": "{{$guid}}",                  "type": "text" },
+      { "key": "sourceSystem",     "value": "{{sourceSystem}}",            "type": "text" },
+      { "key": "targetSystem",     "value": "{{targetSystem}}",            "type": "text" },
+      { "key": "Content-Type",     "value": "application/json",            "type": "text" }
+    ],
+    "body": {
+      "mode": "raw",
+      "raw": "<inlined business-inbound JSON>",
+      "options": { "raw": { "language": "json" } }
+    },
+    "url": {
+      "raw": "{{base_url_DEV}}/api/v1/{path}",
+      "host": [ "{{base_url_DEV}}" ],
+      "path": [ "api", "v1", "{path-segment}" ],
+      "query": [ /* from <munit:set-event> queryParams */ ],
+      "variable": [ /* from <munit:set-event> uriParams */ ]
+    }
+  },
+  "response": [
+    {
+      "name": "{scenario} — {statusCode}",
+      "originalRequest": { /* mirror of request */ },
+      "code": 200,
+      "status": "OK",
+      "_postman_previewlanguage": "json",
+      "header": [ { "key": "Content-Type", "value": "application/json" } ],
+      "body": "<inlined business-outbound JSON>"
+    }
+  ]
+}
+```
+
+### 7.2 Path & Naming
+
+- Request `name` format: `{METHOD} {path} — {scenario}` — e.g., `POST /api/v1/consents/opt-ins — Happy Path`, `POST /api/v1/consents/opt-ins — 400 Validation Error`.
+- Folder structure: `<ENV>` → `Happy Path` | `Negative — ...` → individual requests.
+- One Postman request per `endpoint × scenario`, per env.
+
+## 8. Security Rules (Hard Checklist)
+
+Verify all items before writing the file. **Abort generation if any check fails.**
+
+- `client_id` and `client_secret` headers ALWAYS reference `{{anypoint_client_id}}` / `{{anypoint_client_secret}}`. **Never** copy literal values from MUnit fixtures, properties files, or the reference Postman collection (which contains hardcoded secrets and must NOT be replicated verbatim).
+- Bearer tokens use `{{bearer_token}}` only. Never inline a real JWT.
+- The collection-level `variable[]` for `anypoint_client_secret` uses `"type": "secret"` so Postman masks it in the UI.
+- **Pre-write secret scan:** scan the generated JSON for any value matching the regex `[A-Za-z0-9_\-]{16,}` adjacent to a key matching `client_secret|password|api_key|api[_-]?token|access[_-]?token|bearer|token` (case-insensitive). If any non-template value is found, abort and report the offending location.
+- Do not include OAuth `account_id`, real `access_token`, or any signed JWT pulled from MUnit fixtures.
+- Mask obvious PII from MUnit `business-inbound` fixtures the same way `review-logging-standards.mdc` masks payloads — phone numbers (`17742581354` → `1XXXXXXXXXX`), emails (`user@example.com` → `u***@example.com`), account IDs.
+
+### 8.1 Anti-Pattern Reference
+
+The reference collection `agents/postman/examples/sfmc-consents-sys-api.postman_collection.json` (if present) contains hardcoded credentials at lines 20, 52, 167, and 172. These are **anti-patterns**. Use the file for **structural** reference only — never copy header values verbatim.
+
+## 9. Standard Header Set
+
+Every business request must include these headers (referenced via collection variables, never literals):
+
+- `client_id: {{anypoint_client_id}}`
+- `client_secret: {{anypoint_client_secret}}`
+- `x-correlation-id: {{$guid}}` (Postman dynamic variable, randomized per send)
+- `sourceSystem: {{sourceSystem}}`
+- `targetSystem: {{targetSystem}}`
+- `Content-Type: application/json` (only when a request body is present)
+
+Health endpoints (`/ping`, `/health-check`) get only `x-correlation-id`.
+
+## 10. Output Location & Validation
+
+### 10.1 Output Path
+
+Primary: `agents/postman/examples/{api-name}.postman_collection.json`.
+
+If a Mule project root is detected (via `pom.xml` + `src/main/mule/`), also offer to write a copy to `<project-root>/postman/{api-name}.postman_collection.json`. Ask the user before writing the second copy.
+
+### 10.2 Post-Generation Validation Checks
+
+Run these checks after building the JSON, before writing:
+
+- `info.schema` is exactly `https://schema.getpostman.com/json/collection/v2.1.0/collection.json`.
+- Every `request.url.raw` parses to a valid URL whose `host[]`/`path[]` arrays match the `raw` string (no orphaned segments).
+- The §8 secret scan finds zero non-template values.
+- At least one happy-path request exists per HTTP endpoint (negatives are only required where evidenced — see §6.8).
+- **Status-code allow-list:** every emitted negative request has `response[*].code` in `{400, 401, 404, 500}`. Any other code (`403`, `409`, `422`, `502`, `503`, `504`, timeouts, etc.) anywhere in the file fails validation.
+- **No event-driven flows:** the file contains no requests derived from MQ/scheduler/file/JMS-triggered flows (those are pre-filtered in §6.2).
+- Every request references `{{base_url_<ENV>}}` for its host — no literal CloudHub domains in `request.url.host[]`.
+
+If any check fails, fix the issue and re-run validation. Do not write a non-conformant file.
+
+## 11. Anti-Patterns (DO NOT)
+
+- **DO NOT** hardcode `client_id` / `client_secret` / bearer tokens.
+- **DO NOT** replicate `Bearer eyJ...` JWTs from MUnit fixtures or other collections.
+- **DO NOT** emit any status code outside the strict allow-list `{400, 401, 404, 500}` for negatives — including `403`, `409`, `422`, `502`, `503`, `504`, and timeouts.
+- **DO NOT** blanket-apply all four negative codes to every endpoint — emit **only the codes evidenced per endpoint** (§6.8).
+- **DO NOT** generate Postman requests for **non-HTTP-triggered flows** — flows whose source is `anypoint-mq:subscriber`, `scheduler`, `file:listener`, `jms:listener`, `vm:listener`, or any other event-driven source must be skipped entirely (§6.2).
+- **DO NOT** embed real account IDs, tenant IDs, or PII from MUnit `business-inbound` fixtures (mask per §8).
+- **DO NOT** use `0.0.0.0` as a host outside the `local` env folder.
+- **DO NOT** generate one-request-per-MUnit-test — deduplicate to one Postman request per `endpoint × scenario` (§6.9).
+- **DO NOT** silently fail URL resolution — always follow the three-tier fallback in §5.
+
+## 12. Reference Example
+
+`agents/postman/examples/sfmc-consents-sys-api.postman_collection.json` (if present) is the **structural** reference. It demonstrates:
+
+- v2.1 schema URL
+- nested `item[]` folder structure
+- `request.method` / `request.header[]` / `request.body.raw` / `request.url.{raw,protocol,host,port,path}` shape
+- `auth` block usage
+- example CloudHub host pattern (`https://sfmc-consents-sys-api-dev-rbw6jk.vmqzr0.usa-e1.cloudhub.io`)
+
+It violates §8 (hardcoded `client_id`/`client_secret`/JWT). **Do not copy header values from it verbatim** — use only its structural patterns.
+
+## 13. End-to-End Generation Flow
+
+```mermaid
+flowchart LR
+    User["User: 'generate postman collection'"] --> Intent[intent-gen-postman.mdc]
+    Intent --> ReadImpl[Read gen-postman-implementation.mdc]
+    ReadImpl --> Ask["STOP-and-ASK gate (§3)"]
+    Ask --> Discover["Discover RAML + MUnit + fixtures (§4)"]
+    Discover --> MCP["MCP list_applications per env (§5)"]
+    MCP --> Filter["Pre-filter non-HTTP flows (§6.2)"]
+    Filter --> Extract["Extract payloads/headers (§6.3-6.7)"]
+    Extract --> Tailor["Per-endpoint tailoring (§6.8)"]
+    Tailor --> Build["Build v2.1 JSON skeleton (§7)"]
+    Build --> Scrub["Scrub secrets (§8)"]
+    Scrub --> Validate["Schema + content checks (§10)"]
+    Validate --> Write["Write .postman_collection.json (§10.1)"]
+```
+
+## 14. Review Checklist (before declaring done)
+
+- [ ] STOP-and-ASK gate ran and all required answers captured (§3)
+- [ ] All selected envs have a `base_url_<ENV>` entry (resolved, user-supplied, or placeholder) (§5)
+- [ ] Non-HTTP suites pre-filtered, with chat note listing skipped suites (§6.2)
+- [ ] Negative status codes are strictly within `{400, 401, 404, 500}` (§6.3, §10)
+- [ ] Negatives are tailored per endpoint, not blanket-applied (§6.8)
+- [ ] One request per `endpoint × scenario` (deduplicated) (§6.9)
+- [ ] All secrets are Postman variables, never literals (§8)
+- [ ] Pre-write secret scan returned zero matches (§8)
+- [ ] PII masked in fixtures (§8)
+- [ ] `info.schema` is v2.1.0 (§10.2)
+- [ ] No `0.0.0.0` outside `local` (§11)
+- [ ] No requests derived from MQ/scheduler/file/JMS flows in the output (§10.2)
+- [ ] Output written to `agents/postman/examples/{api-name}.postman_collection.json` (§10.1)

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<!--
+		Scatter-gather Route B: tertiary SAPI optional call.
+		Called from update-record-sub-flow only when the guard condition is true
+		(campaignName is non-empty AND recordId is present).
+
+		When scaffolding a real proc API:
+		  - Rename this file and sub-flow to match your actual tertiary operation
+		    (e.g., add-campaign-member-sub-flow.xml)
+		  - Add a dedicated DWL for the tertiary SAPI params
+		    (e.g., v-tertiary-operation-params.dwl), following the same pattern as
+		    v-secondary-operation-params.dwl but using tertiary.sapi.* property keys
+		  - Add logging, payload transformation, and error handling as needed
+	-->
+	<sub-flow name="tertiary-operation-sub-flow" doc:name="tertiary-operation-sub-flow">
+
+		<!--
+			Replace the inline transform below with a resource DWL specific to the
+			tertiary SAPI (e.g., resource="dwls/v-tertiary-operation-params.dwl").
+		-->
+		<ee:transform doc:name="FV Set Target API Params for tertiary operation">
+			<ee:message />
+			<ee:variables>
+				<ee:set-variable variableName="targetApiParams"><![CDATA[%dw 2.0
+output application/json
+---
+{
+	requestMethod: Mule::p('tertiary.sapi.operation.method'),
+	requestPath: Mule::p('tertiary.sapi.operation.path'),
+	requestProtocol: Mule::p('tertiary.sapi.protocol'),
+	requestHost: Mule::p('tertiary.sapi.host'),
+	requestPort: Mule::p('tertiary.sapi.port'),
+	requestBasePath: Mule::p('tertiary.sapi.basePath'),
+	requestPayload: {
+		recordId: vars.recordId default "",
+		campaignName: vars.requestContext.originalPayload.campaignName default ""
+	},
+	headers: {
+		"x-request-id": correlationId,
+		"client_id": Mule::p("tertiary.sapi.client_id") default "",
+		"client_secret": Mule::p("tertiary.sapi.client_secret") default "",
+		"sourceSystem": vars.requestContext.sourceSystem default "",
+		"targetSystem": vars.requestContext.targetSystem default ""
+	},
+	uriParams: {},
+	queryParams: {}
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+
+		<module-logger:build-log-with-encrypted-payload doc:name="LOG BEFORE REQUEST - tertiary operation"
+			config-ref="custom-logger-connector_config"
+			message="POST tertiary-sapi tertiary-operation"
+			tracepoint="BEFORE_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.targetApiParams.requestPayload default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+		<flow-ref name="common-http-request-flow"
+			doc:name="common-http-request-flow (tertiary-sapi POST /tertiary/items)"
+			target="tertiarySapiResponse" />
+
+		<module-logger:build-log-with-encrypted-payload doc:name="LOG AFTER REQUEST - tertiary operation"
+			config-ref="custom-logger-connector_config"
+			message="Response from tertiary-sapi tertiary-operation"
+			tracepoint="AFTER_HTTP_REQUEST"
+			sourceSystem="#[vars.requestContext.sourceSystem]"
+			targetSystem="#[vars.requestContext.targetSystem]">
+			<module-logger:body><![CDATA[#[output application/json --- vars.tertiarySapiResponse default {}]]]></module-logger:body>
+		</module-logger:build-log-with-encrypted-payload>
+
+	</sub-flow>
+
+</mule>

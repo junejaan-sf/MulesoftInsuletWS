@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+	xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:module-logger="http://www.mulesoft.org/schema/mule/module-logger"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xsi:schemaLocation="
+		http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+		http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+		http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+		http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+		http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+		http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+		http://www.mulesoft.org/schema/mule/module-logger http://www.mulesoft.org/schema/mule/module-logger/current/mule-module-logger.xsd">
+
+	<munit:config name="create-record-test-suite.xml"/>
+
+	<!-- =========================================================
+	     TEST 1 — POST /records SUCCESS (ObjectStore cache hit)
+	     OS returns cached RecordType Id → SF create succeeds.
+	     ========================================================= -->
+	<munit:test name="create-record-success-os-cache-hit" description="Test create record success with OS cache hit" tags="SUCCESS">
+		<munit:behavior>
+			<munit-tools:mock-when doc:name="Mock os:retrieve cache hit" processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Retrieve Record Type Id" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- '0125e000000XXXXXAAI']" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+			<munit-tools:spy processor="salesforce:create" doc:name="Spy Salesforce Create">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute attributeName="doc:name" whereValue="Execute SF Create"/>
+				</munit-tools:with-attributes>
+				<munit-tools:before-call>
+					<munit-tools:assert-that
+						expression="#[payload[0].RecordTypeId]"
+						is="#[MunitTools::notNullValue()]"
+						message="RecordTypeId must be set in SF create request"
+						doc:name="Assert Technical Inbound RecordTypeId"/>
+					<munit-tools:assert-that
+						expression="#[payload[0].Name]"
+						is="#[MunitTools::equalTo('Test Record')]"
+						message="Name in SF create request does not match expected"
+						doc:name="Assert Technical Inbound Name"/>
+				</munit-tools:before-call>
+			</munit-tools:spy>
+			<munit-tools:mock-when doc:name="Mock salesforce:create success" processor="salesforce:create">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Create" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/technical-outbound/sf-create-success-response.json')]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+		<munit:execution>
+			<munit:set-event doc:name="Set Create Record Request">
+				<munit:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/business-inbound/create-record-request.json')]"/>
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- { headers: {}, queryParams: {}, uriParams: {}, originalPayload: '', requestPath: '/api/records', sourceSystem: 'Test', targetSystem: 'Salesforce' }]"/>
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="post:\records:application\json:sf-http-sys-api-template-spec-config" name="post:\records:application\json:sf-http-sys-api-template-spec-config" doc:id="11110001-aaaa-4444-bbbb-cc0000000001"/>
+		</munit:execution>
+		<munit:validation>
+			<munit-tools:assert-that doc:name="Assert id in response" expression="#[payload.id]" is="#[MunitTools::equalTo('a005e000000XxXXAAZ')]"/>
+		</munit:validation>
+	</munit:test>
+
+	<!-- =========================================================
+	     TEST 2 — POST /records SUCCESS (ObjectStore cache miss)
+	     OS returns empty on first call → SF RecordType query →
+	     OS store → OS retrieves cached value → SF create succeeds.
+	     ========================================================= -->
+	<munit:test name="create-record-success-os-cache-miss" description="Test create record success with OS cache miss" tags="SUCCESS">
+		<munit:behavior>
+			<munit-tools:mock-when doc:name="Mock os:retrieve cache miss" processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Retrieve Record Type Id" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- []]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+			<munit-tools:mock-when doc:name="Mock salesforce:query RecordType" processor="salesforce:query">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Query" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/technical-outbound/sf-query-record-type-response.json')]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+			<munit-tools:mock-when doc:name="Mock os:store" processor="os:store">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Storing Record Type Id to OS" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- {}]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+			<munit-tools:mock-when doc:name="Mock salesforce:create success" processor="salesforce:create">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Create" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/technical-outbound/sf-create-success-response.json')]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+		<munit:execution>
+			<munit:set-event doc:name="Set Create Record Request">
+				<munit:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/business-inbound/create-record-request.json')]"/>
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- { headers: {}, queryParams: {}, uriParams: {}, originalPayload: '', requestPath: '/api/records', sourceSystem: 'Test', targetSystem: 'Salesforce' }]"/>
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="post:\records:application\json:sf-http-sys-api-template-spec-config" name="post:\records:application\json:sf-http-sys-api-template-spec-config" doc:id="11110002-aaaa-4444-bbbb-cc0000000002"/>
+		</munit:execution>
+		<munit:validation>
+			<munit-tools:assert-that doc:name="Assert id in response" expression="#[payload.id]" is="#[MunitTools::equalTo('a005e000000XxXXAAZ')]"/>
+		</munit:validation>
+	</munit:test>
+
+	<!-- =========================================================
+	     TEST 3 — POST /records ERROR (SF CONNECTIVITY)
+	     SF create returns CONNECTIVITY → until-successful exhausts
+	     → global error handler returns 503.
+	     ========================================================= -->
+	<munit:test name="create-record-sf-connectivity-error" description="Test create record when Salesforce returns CONNECTIVITY — retry exhausts, 503 returned" tags="ERROR">
+		<munit:behavior>
+			<munit-tools:mock-when doc:name="Mock os:retrieve cache hit" processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Retrieve Record Type Id" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- '0125e000000XXXXXAAI']" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+			<munit-tools:mock-when doc:name="Mock salesforce:create CONNECTIVITY error" processor="salesforce:create">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Create" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:error typeId="SALESFORCE:CONNECTIVITY"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+		<munit:execution>
+			<munit:set-event doc:name="Set Create Record Request">
+				<munit:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/business-inbound/create-record-request.json')]"/>
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- { headers: {}, queryParams: {}, uriParams: {}, originalPayload: '', requestPath: '/api/records', sourceSystem: 'Test', targetSystem: 'Salesforce' }]"/>
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="post:\records:application\json:sf-http-sys-api-template-spec-config" name="post:\records:application\json:sf-http-sys-api-template-spec-config" doc:id="11110003-aaaa-4444-bbbb-cc0000000003"/>
+		</munit:execution>
+		<munit:validation>
+			<munit-tools:assert-that doc:name="Assert recordStatus not set" expression="#[vars.recordStatus]" is="#[MunitTools::nullValue()]"/>
+			<munit-tools:assert-that doc:name="Assert HTTP status 503" expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(503)]"/>
+			<munit-tools:assert-that doc:name="Assert error payload present" expression="#[payload.error]" is="#[MunitTools::notNullValue()]"/>
+			<munit-tools:verify-call doc:name="Verify Log Error called" processor="module-logger:build-error-log-with-encrypted-payload" atLeast="1">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Log Error" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+			</munit-tools:verify-call>
+		</munit:validation>
+	</munit:test>
+
+	<!-- =========================================================
+	     TEST 4 — POST /records ERROR (SF success=false)
+	     SF create returns success=false → sets vars.recordStatus=false
+	     → raises APP:RECORD_CREATION_FAILED → 400 returned.
+	     ========================================================= -->
+	<munit:test name="create-record-sf-creation-failed" description="Test create record when SF returns success=false — raises APP:RECORD_CREATION_FAILED, 400 returned" tags="ERROR">
+		<munit:behavior>
+			<munit-tools:mock-when doc:name="Mock os:retrieve cache hit" processor="os:retrieve">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Retrieve Record Type Id" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- '0125e000000XXXXXAAI']" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+			<munit-tools:mock-when doc:name="Mock salesforce:create failure" processor="salesforce:create">
+				<munit-tools:with-attributes>
+					<munit-tools:with-attribute whereValue="Execute SF Create" attributeName="doc:name"/>
+				</munit-tools:with-attributes>
+				<munit-tools:then-return>
+					<munit-tools:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/technical-outbound/sf-create-failure-response.json')]" mediaType="application/json"/>
+				</munit-tools:then-return>
+			</munit-tools:mock-when>
+		</munit:behavior>
+		<munit:execution>
+			<munit:set-event doc:name="Set Create Record Request">
+				<munit:payload value="#[output application/json --- readUrl('classpath://testdata/create-record-test-suite/business-inbound/create-record-request.json')]"/>
+				<munit:variables>
+					<munit:variable key="requestContext" value="#[output application/java --- { headers: {}, queryParams: {}, uriParams: {}, originalPayload: '', requestPath: '/api/records', sourceSystem: 'Test', targetSystem: 'Salesforce' }]"/>
+				</munit:variables>
+			</munit:set-event>
+			<flow-ref doc:name="post:\records:application\json:sf-http-sys-api-template-spec-config" name="post:\records:application\json:sf-http-sys-api-template-spec-config" doc:id="11110004-aaaa-4444-bbbb-cc0000000004"/>
+		</munit:execution>
+		<munit:validation>
+			<munit-tools:assert-that doc:name="Assert recordStatus set to false" expression="#[vars.recordStatus]" is="#[MunitTools::equalTo(false)]"/>
+			<munit-tools:assert-that doc:name="Assert HTTP status 400" expression="#[vars.httpStatus as Number]" is="#[MunitTools::equalTo(400)]"/>
+			<munit-tools:assert-that doc:name="Assert error code 400" expression="#[payload.error.code]" is="#[MunitTools::equalTo(400)]"/>
+			<munit-tools:assert-that doc:name="Assert error reason" expression="#[payload.error.reason]" is="#[MunitTools::equalTo('Record Create Operation Failed')]"/>
+		</munit:validation>
+	</munit:test>
+
+</mule>

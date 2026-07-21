@@ -1,0 +1,73 @@
+---
+description: Validates a MuleSoft project by running mvn clean package or mvn clean test with the Insulet canonical VM args, auto-fixing build failures iteratively until green or the attempt ceiling is reached.
+globs:
+alwaysApply: false
+---
+
+
+# Intent: Build Validator
+
+Trigger on any of these phrases (case-insensitive):
+- "run mvn"
+- "build the project"
+- "validate the build"
+- "run munit"
+- "run the tests"
+- "fix build errors"
+- "make it compile"
+- "mvn clean package"
+- "mvn clean test"
+- "run build"
+- "use-build"
+
+## Procedure
+
+1. **Read `build-implementation.mdc` in full** before taking any other action.
+
+2. **Locate the target project**
+   - Glob `project/output_develop/*/pom.xml`
+   - If exactly one project is found, use it automatically and tell the user which one.
+   - If multiple projects are found, list them and ask the user which one to build.
+   - If none are found, stop and tell the user to run `/use-develop` first.
+
+3. **Detect phase**
+   - If the user explicitly says "package", "build", or "compile" → phase = `package`
+   - If the user explicitly says "test", "munit", or "run tests" → phase = `test`
+   - Otherwise: check if `src/test/munit/**/*.xml` files exist in the project.
+     - If MUnit test files exist → phase = `test`
+     - If no MUnit test files → phase = `package`
+   - Confirm the detected phase in chat before proceeding.
+
+4. **Determine environment**
+   - If the user specifies an env (`local`, `dev`, `qa`, `uat`, `prod`) → use it.
+   - Otherwise → default to `dev`.
+   - State the env that will be used.
+
+5. **Run the VM-arg gate** as specified in `build-implementation.mdc` (secrets file load, validation, composition).
+   - If the secrets file does not exist → run init flow, stop, tell user to fill values and re-run.
+   - If any required key is missing from the file → list missing keys, stop.
+
+6. **Execute the Maven command** and pipe output to `project/output_build/{project}-{phase}-{timestamp}.log`.
+   - On success (exit code 0) → write success summary, post chat summary table, done.
+   - On failure → classify the error, attempt a patch if auto-fixable, re-run.
+   - Repeat up to the attempt ceiling (default 5; honor user override in chat).
+   - If ceiling is reached without green → escalate with the final log excerpt and recommended manual fix.
+
+7. **Post the chat summary table** covering all attempts:
+
+   ```
+   | # | Phase   | Result | Fixes applied                 | Log file                              |
+   |---|---------|--------|-------------------------------|---------------------------------------|
+   | 1 | package | FAIL   | add dep mule-azure-key-vault  | project/output_build/...-attempt-1.log        |
+   | 2 | package | PASS   | —                             | project/output_build/...-attempt-2.log        |
+   ```
+
+   Footer: paths to the final `.log`, `-fixes.md`, and `-summary.json` files.
+
+## Safety Rules (always enforced)
+
+- Never `git commit`, `git push`, or `mvn deploy`.
+- Never echo, log, or paste secret values — only key names.
+- Never modify credential plumbing (Azure Key Vault config, TLS, token endpoints).
+- All log output is redacted before being written or shown in chat.
+- If `INSULET_VMARGS_FILE` points inside a git repository, stop and warn the user.

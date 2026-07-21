@@ -1,0 +1,224 @@
+---
+description: >-
+  Extracts business and technical design details from a NotebookLM notebook —
+  including Studio Notes (sequence diagrams, architecture sketches), AI-synthesized
+  design summaries, raw source content, and any linked Confluence pages — then
+  saves a structured design example file to agents/design/examples/ for use by
+  downstream RAML and develop agents. Triggers when the user says
+  "notebooklm <JIRA-ID>", "notebooklm <use-case> <JIRA-ID>", or provides a
+  notebook name or story ID alongside a NotebookLM extraction request.
+globs:
+alwaysApply: false
+---
+
+# NotebookLM → Design Examples Workflow
+
+When the user provides a JIRA story ID and/or a business use case name (e.g., `notebooklm NGASIM-3336` or `notebooklm "SMS Double Opt-In" NGASIM-3336`), execute the full workflow below automatically without asking for extra input unless a notebook cannot be unambiguously identified.
+
+---
+
+## Step 1 — Identify the Target Notebook
+
+Call `notebook_list` (NotebookLM MCP) to retrieve all available notebooks.
+
+Match the correct notebook using this priority order:
+1. Exact or partial match of notebook title against the business use case name provided by the user
+2. Partial match of notebook title against the JIRA story ID (e.g., `NGASIM-3336`)
+3. If only one notebook exists, use it directly
+
+If two or more notebooks remain as candidates after matching, present a numbered short list to the user and ask them to confirm with a single reply — do not proceed until confirmed.
+
+---
+
+## Step 2 — Get Notebook Details, Sources & Studio Notes (run in parallel)
+
+Issue all three calls simultaneously once the notebook ID is known:
+
+**2a. `notebook_get(notebook_id)`** — returns notebook metadata and the full list of sources with their IDs. Record every `source_id` for use in Steps 4 and 6.
+
+**2b. `note_list(notebook_id)`** — fetches all Studio Notes from the notebook's Studio panel. These are user-authored notes such as:
+- Sequence diagrams (mermaid syntax)
+- Architecture sketches
+- Decision logs
+- Integration flow descriptions
+
+Capture every note's title and full body content verbatim. Mermaid code blocks and any diagram syntax must be preserved exactly as-is — do not summarise, reformat, or truncate.
+
+**2c. `notebook_describe(notebook_id)`** — returns an AI-generated notebook overview and suggested topics. Use this as the high-level summary seed for the output file header.
+
+---
+
+## Step 3 — Extract Design Content via notebook_query (run in parallel)
+
+Run all five queries simultaneously against the notebook. If the notebook has 50 or more sources, use `notebook_query_start` for each query and poll `notebook_query_status` every 5 seconds until `status: completed` before proceeding to Step 4.
+
+| Query ID | Question to send |
+|---|---|
+| Q1 | "Summarize the business use case and integration purpose in 3–5 sentences" |
+| Q2 | "List all integration endpoints, downstream systems, data flows, and field mappings with types" |
+| Q3 | "List all business rules, field validations, error handling requirements, and edge cases" |
+| Q4 | "List every Jira story ID and every Confluence page URL referenced anywhere in the sources" |
+| Q5 | "Produce a briefing document covering: key architectural decisions, open questions, risks, and the recommended implementation approach" |
+
+Collect the full response text for each query. Do not summarise or truncate the answers.
+
+---
+
+## Step 4 — Extract AI Summaries (run in parallel with Step 3 where possible)
+
+| Call | Purpose |
+|---|---|
+| `notebook_query`: "Generate a study guide with key concepts, definitions, acronyms, and open questions" | Study guide section |
+| `notebook_query`: "Generate a FAQ — list the most important questions a developer would ask and answer each one" | FAQ section |
+| `source_describe(source_id)` for each source ID from Step 2a | Per-source keyword chips and summary paragraph |
+
+---
+
+## Step 5 — Resolve Confluence Links
+
+Scan all text collected in Steps 3 and 4 for Confluence URLs matching either pattern:
+```
+https://insulet.atlassian.net/wiki/spaces/{SPACE}/pages/{PAGE-ID}/{SLUG}
+https://confluence.prod.insulet.com/wiki/spaces/{SPACE}/pages/{PAGE-ID}/{SLUG}
+```
+
+For each unique Confluence URL found:
+1. Extract the numeric `{PAGE-ID}` from the URL
+2. Call `confluence_get_page(page_id, include_body=true)` via the **Atlassian MCP** (`user-atlassian-guardrails`)
+3. Strip any HTML markup from the returned body text
+4. Record the page title, URL, and full plain-text body for the `## Confluence Pages` section
+
+If no Confluence URLs are found, omit the `## Confluence Pages` section from the output file entirely.
+
+---
+
+## Step 6 — Raw Source Content Capture
+
+For each `source_id` from Step 2a, call `source_get_content(source_id)`. This returns the verbatim indexed text of the source (PDF, web page, pasted text, YouTube transcript, etc.) with no AI processing. Append all results to the `## Raw Source Content` section, one subsection per source.
+
+---
+
+## Step 7 — Derive Output File Name
+
+Apply the following rules in order:
+
+```
+businessUseCase = kebab-case slug derived from the notebook title or use case name
+                  e.g. "SMS Double Opt-In"  →  sms-double-opt-in
+                  e.g. "HCP Lead Creation"  →  hcp-lead-creation
+
+storyId         = the JIRA ID supplied by the user
+                  e.g. NGASIM-3336
+
+filename        = {businessUseCase}_{storyId}.md
+                  e.g. sms-double-opt-in_NGASIM-3336.md
+```
+
+If no JIRA story ID was provided by the user, omit the `_{storyId}` suffix and use just `{businessUseCase}.md`.
+
+---
+
+## Step 8 — Write Output File
+
+Write the complete file to `agents/design/examples/{filename}`. Overwrite any existing file with the same name.
+
+Use the following structure exactly. Omit any section whose content is entirely empty.
+
+```markdown
+# Design: {Human-Readable Use Case Name} — {STORY-ID}
+Notebook: {notebook title}
+Extracted: {YYYY-MM-DD}
+
+---
+
+## Business Use Case
+{Q1 response}
+
+---
+
+## Integration Pattern & Data Flow
+{Q2 response — endpoints, systems, flows, field mappings}
+
+---
+
+## Downstream Systems
+{extracted from Q2 — list each downstream system with its role}
+
+---
+
+## Business Rules & Validations
+{Q3 response — rules, validations, edge cases}
+
+---
+
+## Error Handling
+{Q3 response — error scenarios and handling strategy}
+
+---
+
+## Briefing Document
+{Q5 response — key decisions, open questions, risks, recommended approach}
+
+---
+
+## Study Guide
+{study guide query response — key concepts, definitions, open questions}
+
+---
+
+## FAQ
+{FAQ query response — developer questions and answers}
+
+---
+
+## Studio Notes
+{for each note returned by note_list — one subsection per note}
+
+### Note: {note title}
+{verbatim note body — preserve all mermaid code blocks, diagram syntax, and formatting exactly as returned}
+
+---
+
+## Jira / Confluence References
+{Q4 response — every Jira story ID and Confluence URL found}
+
+---
+
+## Confluence Pages
+{only present if Confluence URLs were found and fetched in Step 5}
+
+### Page: {page title} ({page ID})
+Source: {URL}
+
+{full plain-text body from confluence_get_page}
+
+---
+
+## Source Summaries
+{for each source — title, keyword chips, and summary from source_describe}
+
+### Source: {source title}
+{source_describe output}
+
+---
+
+## Raw Source Content
+{for each source — verbatim text from source_get_content}
+
+### Source: {source title}
+{verbatim source body}
+```
+
+---
+
+## Step 9 — Confirm Completion
+
+After writing the file, report:
+- The full path of the file written: `agents/design/examples/{filename}`
+- Number of Studio Notes captured
+- Number of Confluence pages fetched
+- Number of raw sources included
+- A one-sentence description of the business use case extracted
+
+> This file is now ready for use by `/use-raml`, `/use-develop`, and `/use-design` agents.
+> Reference it via `@agents/design/examples/{filename}` in those agent chats.
